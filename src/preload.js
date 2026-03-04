@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('api', {
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   addResource: (sessionId, url) => ipcRenderer.invoke('resource:add', sessionId, url),
   removeResource: (sessionId, key) => ipcRenderer.invoke('resource:remove', sessionId, key),
+  getSessionStatus: (sessionId) => ipcRenderer.invoke('session:getStatus', sessionId),
   openSession: (sessionId) => ipcRenderer.invoke('session:open', sessionId),
   newSession: (cwd) => ipcRenderer.invoke('session:new', cwd),
   killSession: (sessionId) => ipcRenderer.invoke('pty:kill', sessionId),

@@ -2,6 +2,24 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.8.0] - 2026-03-04
+
+### Added
+- **Session Status panel** — replaces the Resource panel with a richer, collapsible status view (`Ctrl+I` / `📋` button)
+  - Shows current Copilot intent (live pulse indicator)
+  - Session summary extracted from session-summary.md or checkpoints
+  - Next steps with progress tracking (done/current/pending states)
+  - Timeline of session events with color-coded dots
+  - Files changed with added/modified badges
+  - Collapsible sections with persistent expand/collapse state
+- **Status Service** — new backend service that reads session intent, summary, plan, files, and timeline from session state
+- **Keyboard shortcut** — `Ctrl+I` toggles the status panel; works even when terminal is focused
+
+### Changed
+- **Repository migration** — DeepSky moved from `itsela-ms/DeepSky` to `itsela_microsoft/DeepSky` to enable community contributions. Auto-updater now points to the new repository — future updates arrive from the new location automatically.
+- **Update badge** — now shows immediately when a download starts (not just after completion); toast notification only fires after download completes
+- Resources (PRs, work items, pipelines, repos, links) are now displayed as sections inside the Status panel instead of the old dedicated Resource panel
+
 ## [0.7.0] - 2026-02-26
 
 ### Added

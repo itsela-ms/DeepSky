@@ -1,6 +1,6 @@
 {
   "name": "deepsky",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Your command center for GitHub Copilot CLI — manage, search, and switch between sessions from a sleek desktop app.",
   "main": "src/main.js",
   "author": "itsela-ms",
@@ -37,7 +37,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "itsela-ms",
+      "owner": "itsela_microsoft",
       "repo": "DeepSky"
     },
     "forceCodeSigning": false

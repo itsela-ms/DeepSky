@@ -7,6 +7,7 @@ const PtyManager = require('./pty-manager');
 const TagIndexer = require('./tag-indexer');
 const ResourceIndexer = require('./resource-indexer');
 const { parseUrlToResource } = require('./resource-indexer');
+const StatusService = require('./status-service');
 const SettingsService = require('./settings-service');
 const NotificationService = require('./notification-service');
 const UpdateService = require('./update-service');
@@ -22,6 +23,7 @@ let tagIndexer;
 let resourceIndexer;
 let settingsService;
 let notificationService;
+let statusService;
 let ptyFlushTimer = null;
 
 const COPILOT_PATH = resolveCopilotPath();
@@ -107,6 +109,8 @@ app.whenReady().then(async () => {
 
   resourceIndexer = new ResourceIndexer(SESSION_STATE_DIR);
   await resourceIndexer.init();
+
+  statusService = new StatusService(SESSION_STATE_DIR);
 
   await sessionService.cleanEmptySessions();
 
@@ -373,6 +377,11 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('resource:remove', async (event, sessionId, key) => {
     await resourceIndexer.removeResource(sessionId, key);
+  });
+
+  // IPC: Get session status (intent, summary, plan, timeline, files)
+  ipcMain.handle('session:getStatus', async (event, sessionId) => {
+    return statusService.getSessionStatus(sessionId);
   });
 
   // Forward pty output to renderer — batch at 16ms intervals to prevent IPC flooding

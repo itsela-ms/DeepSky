@@ -53,7 +53,7 @@
           <div class="tabs-scroll-area">
           </div>
           <button class="tab-scroll-btn tab-scroll-right" title="Scroll right">▶</button>
-          <button id="btn-toggle-resources" title="Links">🔗</button>
+          <button id="btn-toggle-status" title="Session Status (Ctrl+I)">📋</button>
         </div>
         <div id="terminal-main-row">
           <div id="terminal-container">
@@ -64,19 +64,14 @@
             </div>
           </div>
 
-          <!-- Resource panel (right sidebar, collapsible) -->
-          <div id="resource-panel" class="collapsed">
-            <div id="resource-panel-header">
-              <h3>Session Resources</h3>
-              <button class="resource-panel-close" title="Close">×</button>
+          <!-- Status panel (right sidebar, collapsible) -->
+          <div id="status-panel" class="collapsed">
+            <div id="status-panel-header">
+              <h3>Session Status</h3>
+              <button class="status-panel-close" title="Close">×</button>
             </div>
-            <div class="resource-add-row">
-              <input type="text" id="resource-add-input" placeholder="Paste a link to add…" />
-              <button class="resource-add-btn" id="resource-add-btn" title="Add resource">+</button>
-            </div>
-            <div id="resource-add-error" class="resource-add-error" style="display:none"></div>
-            <div id="resource-panel-content">
-              <div class="resource-empty">Open a session to see its resources</div>
+            <div id="status-panel-body">
+              <div class="status-empty">Open a session to see its status</div>
             </div>
           </div>
         </div>

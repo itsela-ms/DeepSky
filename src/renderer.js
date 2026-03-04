@@ -84,12 +84,9 @@ const btnCloseInstructions = document.getElementById('btn-close-instructions');
 const terminalArea = document.getElementById('terminal-area');
 const settingsOverlay = document.getElementById('settings-overlay');
 const btnSettings = document.getElementById('btn-settings');
-const resourcePanel = document.getElementById('resource-panel');
-const resourcePanelContent = document.getElementById('resource-panel-content');
-const btnToggleResources = document.getElementById('btn-toggle-resources');
-const resourceAddInput = document.getElementById('resource-add-input');
-const resourceAddBtn = document.getElementById('resource-add-btn');
-const resourceAddError = document.getElementById('resource-add-error');
+const statusPanel = document.getElementById('status-panel');
+const statusPanelBody = document.getElementById('status-panel-body');
+const btnToggleStatus = document.getElementById('btn-toggle-status');
 const notificationBadge = document.getElementById('notification-badge');
 const notificationPanel = document.getElementById('notification-panel');
 const notificationListEl = document.getElementById('notification-list');
@@ -182,6 +179,7 @@ sessionList.addEventListener('keydown', (e) => {
 // Initialize
 async function init() {
   const settings = await window.api.getSettings();
+  window._cachedSettings = settings;
   maxConcurrentInput.value = settings.maxConcurrent;
   promptWorkdirInput.checked = !!settings.promptForWorkdir;
   defaultWorkdirInput.value = settings.defaultWorkdir || '';
@@ -234,7 +232,7 @@ async function init() {
             activeSessionId = null;
             const remaining = document.querySelectorAll('.tab');
             if (remaining.length > 0) switchToSession(remaining[remaining.length - 1].dataset.sessionId);
-            else { emptyState.classList.remove('hidden'); updateResourcePanel(null); }
+            else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
           }
           saveTabState();
           scheduleRenderSessionList();
@@ -269,7 +267,7 @@ async function init() {
       activeSessionId = null;
       const remaining = document.querySelectorAll('.tab');
       if (remaining.length > 0) switchToSession(remaining[remaining.length - 1].dataset.sessionId);
-      else { emptyState.classList.remove('hidden'); updateResourcePanel(null); }
+      else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
     }
     renderSessionList();
     saveTabState();
@@ -325,36 +323,12 @@ async function init() {
     });
   });
 
-  // Resource panel
-  btnToggleResources.addEventListener('click', toggleResourcePanel);
-  resourcePanel.querySelector('.resource-panel-close').addEventListener('click', () => {
-    resourcePanel.classList.add('collapsed');
-    btnToggleResources.classList.remove('active');
+  // Status panel
+  btnToggleStatus.addEventListener('click', toggleStatusPanel);
+  statusPanel.querySelector('.status-panel-close').addEventListener('click', () => {
+    statusPanel.classList.add('collapsed');
+    btnToggleStatus.classList.remove('active');
     fitActiveTerminal();
-  });
-
-  // Add resource
-  async function handleAddResource() {
-    const url = resourceAddInput.value.trim();
-    if (!url) return;
-    if (!activeSessionId) return;
-    resourceAddError.style.display = 'none';
-    const result = await window.api.addResource(activeSessionId, url);
-    if (result && !result.added) {
-      resourceAddError.textContent = result.reason === 'duplicate' ? 'Resource already linked' : 'Could not add resource';
-      resourceAddError.style.display = 'block';
-      setTimeout(() => { resourceAddError.style.display = 'none'; }, 3000);
-      return;
-    }
-    resourceAddInput.value = '';
-    // Refresh the session's resources from main and re-render
-    const sessions = await window.api.listSessions();
-    allSessions = sessions;
-    updateResourcePanel(activeSessionId);
-  }
-  resourceAddBtn.addEventListener('click', handleAddResource);
-  resourceAddInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') handleAddResource();
   });
 
   // Tab scroll buttons
@@ -479,6 +453,7 @@ function handleUpdateStatus(data) {
     case 'available':
       statusEl.textContent = `Downloading v${data.info?.version}…`;
       statusEl.className = 'update-status';
+      setUpdateBadge(true, data.info?.version, false);
       btnCheck.disabled = true;
       break;
     case 'not-available':
@@ -495,7 +470,7 @@ function handleUpdateStatus(data) {
     case 'downloaded':
       statusEl.textContent = `v${data.info?.version} will be installed on next quit.`;
       statusEl.className = 'update-status update-available';
-      setUpdateBadge(true, data.info?.version);
+      setUpdateBadge(true, data.info?.version, true);
       break;
     case 'error':
       statusEl.textContent = `Update error: ${data.error}`;
@@ -507,7 +482,7 @@ function handleUpdateStatus(data) {
   }
 }
 
-function setUpdateBadge(show, version) {
+function setUpdateBadge(show, version, notify) {
   let badge = document.getElementById('update-badge');
   if (show) {
     if (!badge) {
@@ -517,9 +492,11 @@ function setUpdateBadge(show, version) {
       btnSettings.appendChild(badge);
     }
     badge.textContent = '↑';
-    badge.title = `v${version} ready — will apply on quit`;
+    badge.title = `v${version} available`;
     badge.classList.remove('hidden');
-    showToast({ type: 'info', title: 'Update ready', body: `v${version} downloaded — will apply next time you close DeepSky.` });
+    if (notify) {
+      showToast({ type: 'info', title: 'Update ready', body: `v${version} downloaded — will apply next time you close DeepSky.` });
+    }
   } else if (badge) {
     badge.classList.add('hidden');
   }
@@ -1150,6 +1127,9 @@ function createTerminal(sessionId) {
     // Let Ctrl+W bubble for closing tabs
     if (mod && e.key === 'w') return false;
 
+    // Let Ctrl+I bubble for status panel toggle
+    if (mod && e.key === 'i') return false;
+
     // Ctrl+C with a selection → copy to clipboard instead of sending SIGINT
     if (mod && e.key === 'c' && terminal.hasSelection()) {
       e.preventDefault();
@@ -1209,7 +1189,7 @@ function switchToSession(sessionId) {
   const activeTab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
   if (activeTab) activeTab.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
 
-  updateResourcePanel(sessionId);
+  updateStatusPanel(sessionId);
   patchActiveHighlight();
   patchSessionStateBadges();
   saveTabState();
@@ -1229,7 +1209,7 @@ function showHome() {
   activeSessionId = null;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   emptyState.classList.remove('hidden');
-  updateResourcePanel(null);
+  updateStatusPanel(null);
 }
 
 function addTab(sessionId, title) {
@@ -1322,7 +1302,7 @@ async function closeTab(sessionId) {
       switchToSession(remainingTabs[remainingTabs.length - 1].dataset.sessionId);
     } else {
       emptyState.classList.remove('hidden');
-      updateResourcePanel(null);
+      updateStatusPanel(null);
     }
   }
 
@@ -1683,161 +1663,214 @@ function removeTabFromGroupSilent(sessionId) {
   }
 }
 
-// Resource panel
-function toggleResourcePanel() {
-  const collapsed = resourcePanel.classList.toggle('collapsed');
-  btnToggleResources.classList.toggle('active', !collapsed);
-  if (!collapsed && activeSessionId) updateResourcePanel(activeSessionId);
-  // Refit terminal after panel toggle
+// Status panel
+function toggleStatusPanel() {
+  const collapsed = statusPanel.classList.toggle('collapsed');
+  btnToggleStatus.classList.toggle('active', !collapsed);
+  if (!collapsed && activeSessionId) updateStatusPanel(activeSessionId);
   setTimeout(fitActiveTerminal, 250);
 }
 
-function normalizeRepoUrl(url) {
-  url = (url || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
-  url = url.replace(/microsoft\.visualstudio\.com/, 'dev.azure.com/microsoft');
-  url = url.replace(/\/DefaultCollection\//, '/');
-  const gitIdx = url.indexOf('/_git/');
-  if (gitIdx !== -1) {
-    const afterGit = url.substring(gitIdx + 6);
-    const repoName = afterGit.split('/')[0];
-    url = url.substring(0, gitIdx + 6) + repoName;
-  }
-  return url;
+// Section expand/collapse state
+let statusSectionState = {};
+
+function loadStatusSectionState() {
+  try {
+    const settings = window._cachedSettings || {};
+    statusSectionState = settings.statusPanelSections || {
+      summary: true, nextSteps: false, prs: false, workitems: false,
+      files: false, pipelines: false, timeline: false
+    };
+  } catch { /* defaults above */ }
 }
 
-function resourceKeyRenderer(r) {
-  if (r.id) return `${r.type}:${r.id}`;
-  const url = r.type === 'repo' ? normalizeRepoUrl(r.url) : (r.url || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
-  return `${r.type}:${url}`;
+function saveStatusSectionState() {
+  window.api.updateSettings({ statusPanelSections: statusSectionState });
 }
 
-function renderResourceRow(r, icon, iconClass, label, url, extra) {
-  const key = resourceKeyRenderer(r);
-  const removeBtn = `<button class="resource-remove" data-key="${escapeHtml(key)}" title="Remove">×</button>`;
-  return `<a class="resource-link" href="${escapeHtml(url)}" target="_blank" title="${escapeHtml(url)}" data-key="${escapeHtml(key)}">
-    <span class="resource-icon${iconClass ? ' ' + iconClass : ''}">${escapeHtml(icon)}</span>
-    <span class="resource-label">${label}</span>
-    ${removeBtn}
-  </a>`;
+function toggleStatusSection(sectionKey, el) {
+  const expanded = el.classList.toggle('expanded');
+  statusSectionState[sectionKey] = expanded;
+  saveStatusSectionState();
 }
 
-function updateResourcePanel(sessionId) {
-  if (resourcePanel.classList.contains('collapsed')) return;
+function renderStatusSection(key, icon, title, badge, contentHtml) {
+  if (!contentHtml) return '';
+  const expanded = statusSectionState[key] ? 'expanded' : '';
+  return `<div class="status-section ${expanded}" data-section="${key}">
+    <div class="status-section-header">
+      <span class="status-section-icon">${icon}</span>
+      <span class="status-section-title">${escapeHtml(title)}</span>
+      ${badge ? `<span class="status-section-badge">${escapeHtml(String(badge))}</span>` : ''}
+      <span class="status-section-chevron">▶</span>
+    </div>
+    <div class="status-section-content">${contentHtml}</div>
+  </div>
+  <div class="status-divider"></div>`;
+}
+
+function renderResourceItems(resources) {
+  const ICONS = {
+    pr: ['PR', 'status-resource-icon-pr'],
+    workitem: ['WI', 'status-resource-icon-wi'],
+    pipeline: ['Build', 'status-resource-icon-pipeline'],
+    release: ['Rel', 'status-resource-icon-release'],
+    repo: ['Repo', 'status-resource-icon-repo'],
+    wiki: ['Wiki', 'status-resource-icon-wiki'],
+    link: ['🔗', 'status-resource-icon-link'],
+  };
+
+  return resources.map(r => {
+    const [iconText, iconClass] = ICONS[r.type] || ['·', ''];
+    let label = '';
+    if (r.type === 'pr') {
+      const stateTag = r.state ? ` <span class="status-pr-state status-pr-${r.state}">${r.state}</span>` : '';
+      label = `<span class="status-resource-id">${escapeHtml(r.id)}</span> ${r.repo ? escapeHtml(r.repo) : ''}${stateTag}`;
+    } else if (r.type === 'workitem') {
+      label = `<span class="status-resource-id">${escapeHtml(r.id)}</span>`;
+    } else if (r.type === 'pipeline') {
+      const displayId = r.id.startsWith('def-') ? `Def ${r.id.slice(4)}` : `#${r.id}`;
+      label = `<span class="status-resource-id">${escapeHtml(displayId)}</span>`;
+    } else if (r.type === 'release') {
+      label = `<span class="status-resource-id">#${escapeHtml(r.id)}</span>`;
+    } else if (r.type === 'repo') {
+      label = escapeHtml(r.name || r.url);
+    } else if (r.type === 'wiki') {
+      try { label = escapeHtml(decodeURIComponent(r.url.split('/').pop() || r.url)); }
+      catch { label = escapeHtml(r.url.split('/').pop() || r.url); }
+    } else {
+      label = escapeHtml(r.name || r.url || '');
+    }
+
+    const url = r.url || '#';
+    return `<div class="status-resource-item" data-url="${escapeHtml(url)}">
+      <span class="status-resource-icon ${iconClass}">${escapeHtml(iconText)}</span>
+      <span class="status-resource-details">${label}</span>
+    </div>`;
+  }).join('');
+}
+
+async function updateStatusPanel(sessionId) {
+  if (statusPanel.classList.contains('collapsed')) return;
+  loadStatusSectionState();
 
   if (!sessionId) {
-    resourcePanelContent.innerHTML = '<div class="resource-empty">Open a session to see its resources</div>';
+    statusPanelBody.innerHTML = '<div class="status-empty">Open a session to see its status</div>';
     return;
   }
 
-  const session = allSessions.find(s => s.id === sessionId);
+  // Fetch status data and resources in parallel
+  const [statusData, session] = await Promise.all([
+    window.api.getSessionStatus(sessionId).catch(() => null),
+    Promise.resolve(allSessions.find(s => s.id === sessionId)),
+  ]);
+
   const resources = session?.resources || [];
-
-  if (resources.length === 0) {
-    resourcePanelContent.innerHTML = '<div class="resource-empty">No linked resources for this session</div>';
-    return;
-  }
-
-  const prs = resources.filter(r => r.type === 'pr');
-  const wis = resources.filter(r => r.type === 'workitem');
-  const pipes = resources.filter(r => r.type === 'pipeline');
-  const rels = resources.filter(r => r.type === 'release');
-  const repos = resources.filter(r => r.type === 'repo');
-  const wikis = resources.filter(r => r.type === 'wiki');
-  const links = resources.filter(r => r.type === 'link');
+  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], timeline: [] };
 
   let html = '';
 
+  // Current intent
+  if (status.intent) {
+    html += `<div class="status-intent">
+      <div class="status-intent-pulse"></div>
+      <span class="status-intent-text">${escapeHtml(status.intent)}</span>
+    </div>`;
+  }
+
+  // Summary section
+  if (status.summary) {
+    const summaryContent = `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`;
+    html += renderStatusSection('summary', '📝', 'Summary', null, summaryContent);
+  }
+
+  // Next steps
+  if (status.nextSteps.length > 0) {
+    const total = status.nextSteps.length;
+    const doneCount = status.nextSteps.filter(s => s.done).length;
+    const remaining = total - doneCount;
+    const stepsHtml = status.nextSteps.map((step, i) => {
+      const cls = step.done ? 'done' : step.current ? 'current' : '';
+      const num = step.done ? '✓' : String(i + 1);
+      return `<div class="status-step ${cls}">
+        <span class="status-step-num">${num}</span>
+        <span class="status-step-text">${escapeHtml(step.text)}</span>
+      </div>`;
+    }).join('');
+    // Show badge only when there's a mix of done/pending (i.e. progress is meaningful)
+    const badge = doneCount > 0 && remaining > 0 ? `${remaining} remaining` : remaining > 0 ? `${total} steps` : 'done';
+    html += renderStatusSection('nextSteps', '🎯', 'Next Steps', badge, stepsHtml);
+  }
+
+  // Pull requests
+  const prs = resources.filter(r => r.type === 'pr');
   if (prs.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Pull Requests</div>';
-    for (const pr of prs) {
-      const stateTag = pr.state ? `<span class="resource-pr-state resource-pr-${pr.state}">${pr.state}</span>` : '';
-      const label = `<span class="resource-id">${escapeHtml(pr.id)}</span> ${pr.repo ? escapeHtml(pr.repo) : ''}${stateTag}`;
-      html += renderResourceRow(pr, 'PR', 'resource-icon-pr', label, pr.url || '#', '');
-    }
-    html += '</div>';
+    html += renderStatusSection('prs', '⤴', 'Pull Requests', prs.length, renderResourceItems(prs));
   }
 
+  // Work items
+  const wis = resources.filter(r => r.type === 'workitem');
   if (wis.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Work Items</div>';
-    for (const wi of wis) {
-      const label = `<span class="resource-id">${escapeHtml(wi.id)}</span>`;
-      html += renderResourceRow(wi, 'WI', 'resource-icon-wi', label, wi.url || '#', '');
-    }
-    html += '</div>';
+    html += renderStatusSection('workitems', '📌', 'Work Items', wis.length, renderResourceItems(wis));
   }
 
-  if (pipes.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Pipelines</div>';
-    for (const p of pipes) {
-      const displayId = p.id.startsWith('def-') ? `Def ${p.id.slice(4)}` : `#${p.id}`;
-      const label = `<span class="resource-id">${escapeHtml(displayId)}</span>`;
-      html += renderResourceRow(p, 'Build', 'resource-icon-pipeline', label, p.url || '#', '');
-    }
-    html += '</div>';
+  // Files changed
+  if (status.files.length > 0) {
+    const filesHtml = status.files.map(f => {
+      const badgeCls = f.action === 'A' ? 'status-file-added' : 'status-file-modified';
+      return `<div class="status-file-item">
+        <span class="status-file-badge ${badgeCls}">${f.action}</span>
+        <span class="status-file-path">${escapeHtml(f.path)}</span>
+      </div>`;
+    }).join('');
+    html += renderStatusSection('files', '📂', 'Files Changed', status.files.length, filesHtml);
   }
 
-  if (rels.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Releases</div>';
-    for (const r of rels) {
-      const label = `<span class="resource-id">#${escapeHtml(r.id)}</span>`;
-      html += renderResourceRow(r, 'Rel', 'resource-icon-release', label, r.url || '#', '');
-    }
-    html += '</div>';
+  // Pipelines, releases, repos, wikis, links
+  const otherResources = resources.filter(r => !['pr', 'workitem'].includes(r.type));
+  if (otherResources.length > 0) {
+    html += renderStatusSection('pipelines', '🔗', 'Resources', otherResources.length, renderResourceItems(otherResources));
   }
 
-  if (repos.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Repositories</div>';
-    for (const repo of repos) {
-      const label = escapeHtml(repo.name);
-      html += renderResourceRow(repo, 'Repo', '', label, repo.url, '');
-    }
-    html += '</div>';
+  // Timeline
+  if (status.timeline.length > 0) {
+    const DOT_COLORS = {
+      start: 'var(--text-dim)', resume: 'var(--text-dim)', user: 'var(--accent)',
+      plan: 'var(--yellow)', agent: 'var(--mauve)',
+    };
+    const timelineHtml = status.timeline.map(ev => {
+      const time = new Date(ev.time);
+      const hhmm = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+      const color = DOT_COLORS[ev.type] || 'var(--text-dim)';
+      return `<div class="status-timeline-item">
+        <span class="status-timeline-time">${hhmm}</span>
+        <div class="status-timeline-dot" style="background:${color}"></div>
+        <span class="status-timeline-text">${escapeHtml(ev.text)}</span>
+      </div>`;
+    }).join('');
+    html += renderStatusSection('timeline', '🕐', 'Timeline', null, timelineHtml);
   }
 
-  if (wikis.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Wiki Pages</div>';
-    for (const wiki of wikis) {
-      let name;
-      try { name = decodeURIComponent(wiki.url.split('/').pop() || wiki.url); }
-      catch { name = wiki.url.split('/').pop() || wiki.url; }
-      html += renderResourceRow(wiki, 'Wiki', '', escapeHtml(name), wiki.url, '');
-    }
-    html += '</div>';
+  if (!html) {
+    html = '<div class="status-empty">No status data yet for this session</div>';
   }
 
-  if (links.length > 0) {
-    html += '<div class="resource-section"><div class="resource-section-title">Links</div>';
-    for (const link of links) {
-      const label = escapeHtml(link.name || link.url);
-      html += renderResourceRow(link, '🔗', 'resource-icon-link', label, link.url, '');
-    }
-    html += '</div>';
-  }
+  statusPanelBody.innerHTML = html;
 
-  resourcePanelContent.innerHTML = html;
-
-  // Open links in external browser (but not when clicking the remove button)
-  resourcePanelContent.querySelectorAll('a.resource-link').forEach(a => {
-    a.addEventListener('click', (e) => {
-      if (e.target.closest('.resource-remove')) return;
-      e.preventDefault();
-      const href = a.getAttribute('href');
-      if (href && href !== '#') window.api.openExternal(href);
+  // Wire section expand/collapse
+  statusPanelBody.querySelectorAll('.status-section-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const section = header.closest('.status-section');
+      const key = section.dataset.section;
+      toggleStatusSection(key, section);
     });
   });
 
-  // Remove buttons
-  resourcePanelContent.querySelectorAll('.resource-remove').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const key = btn.dataset.key;
-      if (!key || !activeSessionId) return;
-      await window.api.removeResource(activeSessionId, key);
-      // Refresh
-      const sessions = await window.api.listSessions();
-      allSessions = sessions;
-      updateResourcePanel(activeSessionId);
+  // Wire resource item clicks → open in external browser
+  statusPanelBody.querySelectorAll('.status-resource-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const url = item.dataset.url;
+      if (url && url !== '#') window.api.openExternal(url);
     });
   });
 }
@@ -2391,6 +2424,12 @@ document.addEventListener('keydown', (e) => {
     const isXterm = ae?.classList.contains('xterm-helper-textarea');
     if (!isXterm && (ae?.tagName === 'INPUT' || ae?.tagName === 'TEXTAREA')) return;
     if (activeSessionId) closeTab(activeSessionId);
+  }
+
+  // Ctrl/Cmd+I: Toggle status panel
+  if (mod && e.key === 'i') {
+    e.preventDefault();
+    toggleStatusPanel();
   }
 
   // Ctrl/Cmd+F: Focus search bar
