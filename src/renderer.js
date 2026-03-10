@@ -1119,7 +1119,8 @@ function createTerminal(sessionId) {
     }, true);
   }
 
-  // Intercept shortcuts — handles copy, paste, word-delete, newline, and bubbles app-level shortcuts
+  // Intercept terminal shortcuts via the shared helper so local behavior layers on
+  // top of main's current shortcut plumbing instead of replacing it.
   terminal.attachCustomKeyEventHandler(createTerminalKeyHandler(sessionId, terminal, window.api));
 
   terminals.set(sessionId, { terminal, fitAddon, wrapper });
