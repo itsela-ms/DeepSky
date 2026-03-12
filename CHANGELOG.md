@@ -2,6 +2,11 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.8.3] - 2026-03-12
+
+### Changed
+- **Custom notification popups** — replaced Windows native toast notifications with themed Catppuccin popups that slide in from the bottom-right, stack when multiple arrive, auto-dismiss after 6 seconds, and navigate to the relevant session on click
+
 ## [0.8.2] - 2026-03-09
 
 ### Added

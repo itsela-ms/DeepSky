@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, Notification, Menu, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu, dialog, clipboard, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -17,6 +17,68 @@ app.commandLine.appendSwitch('disable-gpu-compositing');
 
 let mainWindow;
 let updateService;
+
+// Active notification popup windows, used for stacking
+let activeNotifWindows = [];
+// Maps BrowserWindow.id → notification object for click handling
+const notifWindowData = new Map();
+
+function showNotificationPopup(notification) {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { workArea } = primaryDisplay;
+
+  const NOTIF_WIDTH = 360;
+  const NOTIF_HEIGHT = 100; // tall enough for title + body + padding
+  const PADDING = 20;
+  const STACK_GAP = 8;
+
+  const stackOffset = activeNotifWindows.length * (NOTIF_HEIGHT + STACK_GAP);
+  const x = Math.round(workArea.x + workArea.width - NOTIF_WIDTH - PADDING);
+  const y = Math.round(workArea.y + workArea.height - NOTIF_HEIGHT - PADDING - stackOffset);
+
+  const notifWin = new BrowserWindow({
+    width: NOTIF_WIDTH,
+    height: NOTIF_HEIGHT,
+    x,
+    y,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    focusable: false,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'notification-popup-preload.js'),
+    },
+  });
+
+  notifWin.loadFile(path.join(__dirname, 'notification-popup.html'));
+
+  notifWin.webContents.on('did-finish-load', () => {
+    const theme = settingsService.get().theme || 'mocha';
+    notifWin.webContents.send('notification:show', { ...notification, theme });
+    notifWin.showInactive();
+  });
+
+  activeNotifWindows.push(notifWin);
+  notifWindowData.set(notifWin.id, notification);
+
+  const dismissTimer = setTimeout(() => {
+    if (!notifWin.isDestroyed()) notifWin.close();
+  }, 6000);
+
+  notifWin.on('closed', () => {
+    clearTimeout(dismissTimer);
+    activeNotifWindows = activeNotifWindows.filter(w => w !== notifWin);
+    notifWindowData.delete(notifWin.id);
+  });
+}
+
 let sessionService;
 let ptyManager;
 let tagIndexer;
@@ -123,24 +185,8 @@ app.whenReady().then(async () => {
       mainWindow.webContents.send('notification:new', notification);
     }
 
-    // System tray notification
-    const ICONS = { 'task-done': '✓', 'needs-input': '◌', 'error': '!', 'info': '·' };
-    const icon = ICONS[notification.type] || 'ℹ️';
-    const osNotif = new Notification({
-      title: `${icon} ${notification.title}`,
-      body: notification.body || '',
-      silent: notification.type === 'info',
-    });
-    osNotif.on('click', () => {
-      if (mainWindow) {
-        mainWindow.show();
-        mainWindow.focus();
-        if (notification.sessionId) {
-          mainWindow.webContents.send('notification:click', notification);
-        }
-      }
-    });
-    osNotif.show();
+    // Show notification popup pinned to primary display
+    showNotificationPopup(notification);
   });
 
   notificationService.start();
@@ -310,6 +356,25 @@ app.whenReady().then(async () => {
   ipcMain.handle('notifications:markAllRead', () => notificationService.markAllRead());
   ipcMain.handle('notifications:dismiss', (event, id) => notificationService.dismiss(id));
   ipcMain.handle('notifications:clearAll', () => notificationService.clearAll());
+
+  // IPC: Notification popup interactions
+  ipcMain.on('notification-popup:click', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const notification = win ? notifWindowData.get(win.id) : null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+      if (notification?.sessionId) {
+        mainWindow.webContents.send('notification:click', notification);
+      }
+    }
+    if (win && !win.isDestroyed()) win.close();
+  });
+
+  ipcMain.on('notification-popup:dismiss', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && !win.isDestroyed()) win.close();
+  });
 
   // IPC: App info
   ipcMain.handle('app:getVersion', () => app.getVersion());
