@@ -17,6 +17,7 @@ let currentInstructions = '';
 let currentTheme = 'mocha';
 const openingSession = new Set();
 const cwdChangingSessions = new Set(); // sessions undergoing cwd change (suppress exit handling)
+const recentlyClosedSessions = []; // stack of session IDs closed by the user
 const sessionLastUsed = new Map();
 let creatingSession = false;
 const ipcCleanups = []; // unsubscribe fns for IPC listeners
@@ -203,12 +204,22 @@ async function init() {
   // Clean up any previous IPC listeners (guards against double-init on reload)
   while (ipcCleanups.length) ipcCleanups.pop()();
 
+  let scrollSyncTimer = null;
   ipcCleanups.push(window.api.onPtyData((sessionId, data) => {
     const entry = terminals.get(sessionId);
     if (entry) entry.terminal.write(data);
     sessionAliveState.add(sessionId);
     sessionBusyState.set(sessionId, true);
     patchSessionStateBadges();
+    // Debounced viewport sync to keep scroll area accurate as content grows
+    if (sessionId === activeSessionId && entry) {
+      if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
+      scrollSyncTimer = setTimeout(() => {
+        scrollSyncTimer = null;
+        const e = terminals.get(activeSessionId);
+        e?.terminal._core?.viewport?.syncScrollArea(true);
+      }, 150);
+    }
   }));
 
   ipcCleanups.push(window.api.onPtyExit((sessionId, exitCode) => {
@@ -281,13 +292,7 @@ async function init() {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
-      if (activeSessionId) {
-        const entry = terminals.get(activeSessionId);
-        if (entry && entry.fitAddon) {
-          entry.fitAddon.fit();
-          window.api.resizePty(activeSessionId, entry.terminal.cols, entry.terminal.rows);
-        }
-      }
+      fitActiveTerminal();
     }, 50);
   });
   resizeObserver.observe(terminalContainer);
@@ -1114,7 +1119,8 @@ function createTerminal(sessionId) {
     }, true);
   }
 
-  // Intercept shortcuts — handles copy, paste, word-delete, newline, and bubbles app-level shortcuts
+  // Intercept terminal shortcuts via the shared helper so local behavior layers on
+  // top of main's current shortcut plumbing instead of replacing it.
   terminal.attachCustomKeyEventHandler(createTerminalKeyHandler(sessionId, terminal, window.api));
 
   terminals.set(sessionId, { terminal, fitAddon, wrapper });
@@ -1146,6 +1152,7 @@ function switchToSession(sessionId) {
       entry.fitAddon.fit();
       entry.terminal.focus();
       window.api.resizePty(currentId, entry.terminal.cols, entry.terminal.rows);
+      entry.terminal._core?.viewport?.syncScrollArea(true);
     });
   }
 
@@ -1232,6 +1239,9 @@ function updateTabScrollButtons() {
 
 async function closeTab(sessionId) {
   await window.api.killSession(sessionId);
+
+  // Remember for Ctrl+Shift+T restore
+  recentlyClosedSessions.push(sessionId);
 
   const entry = terminals.get(sessionId);
   if (entry) {
@@ -1848,6 +1858,9 @@ function fitActiveTerminal() {
     const entry = terminals.get(activeSessionId);
     entry.fitAddon.fit();
     window.api.resizePty(activeSessionId, entry.terminal.cols, entry.terminal.rows);
+    // Force viewport scroll area sync even when fit() is a no-op (same cols/rows).
+    // Fixes scroll range going stale on sub-row container resizes.
+    entry.terminal._core?.viewport?.syncScrollArea(true);
   }
 }
 
@@ -2425,6 +2438,13 @@ document.addEventListener('keydown', (e) => {
     const isXterm = ae?.classList.contains('xterm-helper-textarea');
     if (!isXterm && (ae?.tagName === 'INPUT' || ae?.tagName === 'TEXTAREA')) return;
     if (activeSessionId) closeTab(activeSessionId);
+  }
+
+  // Ctrl/Cmd+Shift+T: Restore last closed tab
+  if (mod && e.shiftKey && e.key === 'T') {
+    e.preventDefault();
+    const sessionId = recentlyClosedSessions.pop();
+    if (sessionId) openSession(sessionId);
   }
 
   // Ctrl/Cmd+I: Toggle status panel

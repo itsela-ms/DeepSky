@@ -136,15 +136,23 @@ describe('createTerminalKeyHandler', () => {
     expect(api.writePty).toHaveBeenCalledWith(SESSION_ID, '\x17');
   });
 
-  // ── Shift+Enter newline ───────────────────────────────────────────────────
+  // ── Shift+Enter line continuation ────────────────────────────────────────
 
-  it('Shift+Enter: sends literal newline (\\n) to PTY', () => {
-    const e = key({ shiftKey: true, key: 'Enter' });
-    const result = handler(e);
+  it('Shift+Enter: sends backslash then Enter to PTY', () => {
+    vi.useFakeTimers();
+    try {
+      const e = key({ shiftKey: true, key: 'Enter' });
+      const result = handler(e);
 
-    expect(result).toBe(false);
-    expect(api.writePty).toHaveBeenCalledWith(SESSION_ID, '\n');
-    expect(e.preventDefault).toHaveBeenCalled();
+      expect(result).toBe(false);
+      expect(api.writePty).toHaveBeenNthCalledWith(1, SESSION_ID, '\\');
+      expect(e.preventDefault).toHaveBeenCalled();
+
+      vi.advanceTimersByTime(30);
+      expect(api.writePty).toHaveBeenNthCalledWith(2, SESSION_ID, '\r');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('Shift+Enter: does not trigger paste logic', () => {
