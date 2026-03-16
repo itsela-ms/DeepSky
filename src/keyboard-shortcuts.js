@@ -7,8 +7,9 @@
  * @param {string} sessionId - Active session identifier.
  * @param {import('@xterm/xterm').Terminal} terminal - The xterm terminal instance.
  * @param {object} api - The preload API bridge (window.api).
+ * @param {object} hooks - Optional renderer hooks for local prompt UX.
  */
-function createTerminalKeyHandler(sessionId, terminal, api) {
+function createTerminalKeyHandler(sessionId, terminal, api, hooks = {}) {
   return (e) => {
     if (e.type !== 'keydown') return true;
     const mod = e.ctrlKey || e.metaKey;
@@ -30,6 +31,9 @@ function createTerminalKeyHandler(sessionId, terminal, api) {
     // Bubble Ctrl+I for status panel toggle
     if (mod && lowerKey === 'i') return false;
 
+    // Bubble Ctrl+F for in-session search
+    if (mod && !e.shiftKey && lowerKey === 'f') return false;
+
     // Ctrl+C with a selection → copy to clipboard instead of sending SIGINT
     if (mod && lowerKey === 'c' && terminal.hasSelection()) {
       e.preventDefault();
@@ -41,6 +45,7 @@ function createTerminalKeyHandler(sessionId, terminal, api) {
     // Ctrl+Backspace → delete previous word (sends \x17, equivalent to Ctrl+W in Unix shells)
     if (key === 'Backspace' && mod) {
       e.preventDefault();
+      hooks.onInput?.('\x17');
       api.writePty(sessionId, '\x17');
       return false;
     }
@@ -48,8 +53,12 @@ function createTerminalKeyHandler(sessionId, terminal, api) {
     // Shift+Enter → line continuation, matching manual "\" then Enter.
     if (key === 'Enter' && e.shiftKey && !mod) {
       e.preventDefault();
+      hooks.onInput?.('\\');
       api.writePty(sessionId, '\\');
-      setTimeout(() => api.writePty(sessionId, '\r'), 30);
+      setTimeout(() => {
+        hooks.onInput?.('\r');
+        api.writePty(sessionId, '\r');
+      }, 30);
       return false;
     }
 
@@ -58,7 +67,10 @@ function createTerminalKeyHandler(sessionId, terminal, api) {
     if (isPaste) {
       e.preventDefault();
       api.pasteText().then(text => {
-        if (text) api.writePty(sessionId, text);
+        if (text) {
+          hooks.onInput?.(text);
+          api.writePty(sessionId, text);
+        }
       });
       return false;
     }

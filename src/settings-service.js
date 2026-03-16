@@ -4,6 +4,7 @@ const path = require('path');
 const DEFAULTS = {
   maxConcurrent: 5,
   sidebarWidth: 280,
+  sidebarCollapsed: false,
   lastActiveTab: 'active', // 'active' or 'history'
   theme: 'mocha', // 'mocha' or 'latte'
   copilotPath: '', // auto-detect if empty; override with full path to copilot binary

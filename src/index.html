@@ -25,22 +25,23 @@
 
   <div id="app">
     <!-- Sidebar -->
-    <aside id="sidebar">
-      <div id="sidebar-header">
-        <div id="search-wrapper">
-          <input type="text" id="search" placeholder="Search sessions & tags..." autocomplete="off" spellcheck="false">
-          <button id="search-clear" class="search-clear hidden" title="Clear search (Esc)">✕</button>
+      <aside id="sidebar">
+        <div id="sidebar-header">
+          <div id="search-wrapper">
+            <button id="sidebar-search-toggle" class="sidebar-icon-btn" title="Search sessions (Ctrl+F)">🔍</button>
+            <input type="text" id="search" placeholder="Search sessions, tags & content..." autocomplete="off" spellcheck="false">
+            <button id="search-clear" class="search-clear hidden" title="Clear search (Esc)">✕</button>
+          </div>
         </div>
-      </div>
-      <div id="sidebar-actions">
-        <button id="btn-new" title="New Session (Ctrl+N)">+ New Session</button>
-      </div>
-      <div id="sidebar-tabs">
-        <button class="sidebar-tab active" data-tab="active">Active</button>
-        <button class="sidebar-tab" data-tab="history">History</button>
-      </div>
-      <div id="session-list"></div>
-    </aside>
+        <div id="sidebar-actions">
+          <button id="btn-new" title="New Session (Ctrl+N)"><span class="btn-icon">+</span><span class="btn-label">New Session</span></button>
+        </div>
+        <div id="sidebar-tabs">
+          <button class="sidebar-tab active" data-tab="active"><span class="sidebar-tab-short">A</span><span class="sidebar-tab-label">Active</span></button>
+          <button class="sidebar-tab" data-tab="history"><span class="sidebar-tab-short">H</span><span class="sidebar-tab-label">History</span></button>
+        </div>
+        <div id="session-list"></div>
+      </aside>
 
     <!-- Resize handle -->
     <div id="resize-handle"></div>
@@ -56,14 +57,26 @@
           <button class="tab-scroll-btn tab-scroll-right" title="Scroll right">▶</button>
           <button id="btn-toggle-status" title="Session Status (Ctrl+I)">📋</button>
         </div>
-        <div id="terminal-main-row">
-          <div id="terminal-container">
-            <div id="empty-state">
-              <div class="empty-icon">DeepSky</div>
-              <p>No sessions yet. Start a new one to get going.</p>
-              <button id="btn-new-center" title="New Session (Ctrl+N)">+ New Session</button>
+          <div id="terminal-main-row">
+            <div id="terminal-column">
+              <div id="terminal-container">
+                <div id="session-search" class="hidden" aria-label="Find in session">
+                  <div class="session-search-row">
+                    <input type="text" id="session-search-input" placeholder="Find in session..." autocomplete="off" spellcheck="false">
+                  <span id="session-search-count"></span>
+                  <button id="session-search-prev" class="session-search-btn" type="button" title="Previous match (Shift+Enter)" disabled>◀</button>
+                  <button id="session-search-next" class="session-search-btn" type="button" title="Next match (Enter)" disabled>▶</button>
+                    <button id="session-search-close" class="session-search-btn session-search-close" type="button" title="Close search (Esc)">✕</button>
+                  </div>
+                </div>
+                <div id="empty-state">
+                  <div class="empty-icon">DeepSky</div>
+                  <p>No sessions yet. Start a new one to get going.</p>
+                  <button id="btn-new-center" title="New Session (Ctrl+N)">+ New Session</button>
+                </div>
+              </div>
+              <div id="terminal-prompt-ghost" class="terminal-prompt-ghost" aria-hidden="true"></div>
             </div>
-          </div>
 
           <!-- Status panel (right sidebar, collapsible) -->
           <div id="status-panel" class="collapsed">

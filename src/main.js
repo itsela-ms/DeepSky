@@ -414,9 +414,23 @@ app.whenReady().then(async () => {
     }
   });
 
-  // IPC: Get session list (with tags and resources) — also caches for notification titles
   let allSessionsCache = [];
-  ipcMain.handle('sessions:list', async () => {
+  const sessionMatchesSidebarSearch = (session, query) => {
+    if (session.title?.toLowerCase().includes(query)) return true;
+    if (session.cwd?.toLowerCase().includes(query)) return true;
+    if (session.tags?.some(tag => tag.toLowerCase().includes(query))) return true;
+    if (session.resources?.some(resource =>
+      String(resource.id || '').toLowerCase().includes(query) ||
+      String(resource.url || '').toLowerCase().includes(query) ||
+      String(resource.name || '').toLowerCase().includes(query) ||
+      String(resource.repo || '').toLowerCase().includes(query)
+    )) {
+      return true;
+    }
+    return false;
+  };
+
+  const hydrateSessionsCache = async () => {
     const sessions = await sessionService.listSessions();
     allSessionsCache = sessions.map(s => ({
       ...s,
@@ -424,6 +438,27 @@ app.whenReady().then(async () => {
       resources: resourceIndexer.getResourcesForSession(s.id)
     }));
     return allSessionsCache;
+  };
+
+  // IPC: Get session list (with tags and resources) — also caches for notification titles
+  ipcMain.handle('sessions:list', hydrateSessionsCache);
+
+  ipcMain.handle('sessions:search', async (event, query) => {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) return [];
+
+    const [sessions, contentMatches] = await Promise.all([
+      hydrateSessionsCache(),
+      sessionService.searchSessions(needle)
+    ]);
+    const contentMatchIds = new Set(contentMatches.map(match => match.id));
+
+    return sessions
+      .filter(session => contentMatchIds.has(session.id) || sessionMatchesSidebarSearch(session, needle));
+  });
+
+  ipcMain.handle('session:getLastUserPrompt', async (event, sessionId) => {
+    return sessionService.getLastUserPrompt(sessionId);
   });
 
   ipcMain.handle('session:rename', async (event, sessionId, title) => {

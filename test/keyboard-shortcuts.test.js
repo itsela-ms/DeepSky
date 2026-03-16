@@ -14,6 +14,57 @@ function key(overrides = {}) {
   };
 }
 
+class MockCell {
+  constructor(chars) {
+    this._chars = chars;
+  }
+
+  getChars() {
+    return this._chars;
+  }
+
+  getWidth() {
+    return 1;
+  }
+
+  getCode() {
+    return this._chars ? this._chars.codePointAt(0) : 0;
+  }
+}
+
+class MockLine {
+  constructor(text, isWrapped = false) {
+    this._text = text;
+    this.isWrapped = isWrapped;
+    this.length = text.length;
+  }
+
+  getCell(index) {
+    return new MockCell(this._text[index] || ' ');
+  }
+
+  translateToString(trimRight) {
+    return trimRight ? this._text.replace(/\s+$/, '') : this._text;
+  }
+}
+
+class MockBuffer {
+  constructor(lines, cursorX = 0, cursorY = 0) {
+    this._lines = lines.map(line => {
+      if (typeof line === 'string') return new MockLine(line);
+      return new MockLine(line.text || '', !!line.isWrapped);
+    });
+    this.length = this._lines.length;
+    this.baseY = 0;
+    this.cursorY = cursorY;
+    this.cursorX = cursorX;
+  }
+
+  getLine(index) {
+    return this._lines[index];
+  }
+}
+
 describe('createTerminalKeyHandler', () => {
   const SESSION_ID = 'test-session-1';
   let terminal, api, handler;
@@ -23,6 +74,9 @@ describe('createTerminalKeyHandler', () => {
       hasSelection: vi.fn().mockReturnValue(false),
       getSelection: vi.fn().mockReturnValue('selected text'),
       clearSelection: vi.fn(),
+      select: vi.fn(),
+      cols: 120,
+      buffer: { active: new MockBuffer(['alpha beta gamma'], 0) }
     };
     api = {
       copyText: vi.fn(),
@@ -93,6 +147,10 @@ describe('createTerminalKeyHandler', () => {
 
   it('bubbles Ctrl+I (status panel toggle)', () => {
     expect(handler(key({ ctrlKey: true, key: 'i' }))).toBe(false);
+  });
+
+  it('bubbles Ctrl+F (session search)', () => {
+    expect(handler(key({ ctrlKey: true, key: 'f' }))).toBe(false);
   });
 
   // ── Ctrl+C copy ───────────────────────────────────────────────────────────
@@ -212,6 +270,10 @@ describe('createTerminalKeyHandler', () => {
     const result = handler(key({ metaKey: true, key: 'v' }));
     expect(result).toBe(false);
     expect(api.pasteText).toHaveBeenCalled();
+  });
+
+  it('Meta+F bubbles for session search (macOS)', () => {
+    expect(handler(key({ metaKey: true, key: 'f' }))).toBe(false);
   });
 
   // ── Session ID isolation ──────────────────────────────────────────────────
