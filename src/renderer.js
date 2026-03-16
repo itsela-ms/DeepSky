@@ -4,6 +4,7 @@ const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { deriveSessionState } = require('./session-state');
 const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
+const { resolveSidebarDragWidth } = require('./sidebar-resize');
 
 // State
 const terminals = new Map();
@@ -319,7 +320,7 @@ function updateSessionPromptGhost(sessionId) {
 
   const esc = (s) => { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; };
 
-  let html = `<span class="info-title">${esc(title)}</span>`;
+  let html = `<span class="info-badge">Session Context</span><span class="info-title">${esc(title)}</span>`;
   if (lastPrompt) {
     html += `<span class="info-divider">│</span>`;
     html += `<span class="info-prompt" title="${esc(lastPrompt)}">💬 ${esc(lastPrompt)}</span>`;
@@ -1005,7 +1006,6 @@ function createSessionItem(session, group, index) {
   if (sessionAliveState.has(session.id)) el.classList.add('running');
   if (group) {
     el.classList.add('grouped');
-    el.style.borderLeft = `2px solid ${group.color}`;
   }
 
   const lastUsedTime = sessionLastUsed.get(session.id);
@@ -1222,14 +1222,22 @@ function renderSessionList() {
         if (draggedId) addTabToGroup(draggedId, group.id);
       });
 
-      sessionList.appendChild(headerEl);
+      const groupEl = document.createElement('div');
+      groupEl.className = 'session-group';
+      if (group.collapsed) groupEl.classList.add('collapsed');
+      groupEl.style.setProperty('--group-color', group.color);
+      groupEl.appendChild(headerEl);
 
       // Group sessions (if not collapsed)
       if (!group.collapsed) {
         for (const session of groupSessions) {
-          appendSessionItem(session, group);
+          const el = createSessionItem(session, group, displayIndex);
+          displayIndex += 1;
+          groupEl.appendChild(el);
         }
       }
+
+      sessionList.appendChild(groupEl);
     }
 
     // Ungrouped sessions
@@ -1480,10 +1488,6 @@ function createTerminal(sessionId) {
   terminal.open(wrapper);
   fitAddon.fit();
 
-  const promptGhost = document.createElement('div');
-  promptGhost.className = 'terminal-prompt-ghost';
-  wrapper.appendChild(promptGhost);
-
   terminal.onData((data) => {
     handleSessionPromptInput(sessionId, data);
     window.api.writePty(sessionId, data);
@@ -1518,7 +1522,6 @@ function createTerminal(sessionId) {
     terminal,
     fitAddon,
     wrapper,
-    promptGhost,
     isSyncingViewport: false,
     pendingViewportRefreshSearch: false
   });
@@ -2627,30 +2630,22 @@ document.addEventListener('mousemove', (e) => {
     sidebarHidden = false;
     sidebarCollapsed = false;
     syncSidebarCollapsedUi();
+    renderSessionList();
   }
 
-  const rawWidth = e.clientX;
+  const nextSidebarState = resolveSidebarDragWidth(e.clientX, {
+    minWidth: SIDEBAR_MIN_WIDTH,
+    maxWidth: SIDEBAR_MAX_WIDTH
+  });
 
-  if (rawWidth <= SIDEBAR_COLLAPSED_WIDTH) {
-    // Dragged very small → snap to collapsed icon mode
-    if (!sidebarCollapsed) {
-      sidebarCollapsed = true;
-      syncSidebarCollapsedUi();
-    }
-  } else if (rawWidth < SIDEBAR_MIN_WIDTH) {
-    // Between collapsed and min → stay collapsed
-    if (!sidebarCollapsed) {
-      sidebarCollapsed = true;
-      syncSidebarCollapsedUi();
-    }
+  if (nextSidebarState.mode === 'collapsed') {
+    // Dragged narrow enough → snap into collapsed icon mode.
+    setSidebarCollapsed(true, { persist: false });
   } else {
-    // Normal range → expand
     if (sidebarCollapsed) {
-      sidebarCollapsed = false;
-      syncSidebarCollapsedUi();
+      setSidebarCollapsed(false, { persist: false });
     }
-    const newWidth = Math.min(SIDEBAR_MAX_WIDTH, rawWidth);
-    sidebar.style.width = newWidth + 'px';
+    sidebar.style.width = nextSidebarState.width + 'px';
   }
 });
 
@@ -2666,10 +2661,13 @@ document.addEventListener('mouseup', () => {
       sidebarHidden = !sidebarHidden;
       if (sidebarHidden) sidebarCollapsed = false;
       syncSidebarCollapsedUi();
+      if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = sidebarHidden;
       window.api.updateSettings({ sidebarCollapsed: sidebarHidden });
+      renderSessionList();
     } else {
       const width = parseInt(sidebar.style.width, 10);
       if (sidebarCollapsed) {
+        if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = false;
         window.api.updateSettings({ sidebarCollapsed: false });
       } else if (width) {
         persistSidebarWidth(width);
