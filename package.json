@@ -10,7 +10,8 @@
     "start": "npm run build && electron . --no-sandbox",
     "launch": "npm run build && wscript launch.vbs",
     "test": "vitest run",
-    "dist": "npm run build && electron-builder --win"
+    "dist": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac"
   },
   "build": {
     "appId": "com.itsela.deepsky",
@@ -25,6 +26,17 @@
       "node_modules/**/*",
       "!node_modules/.cache"
     ],
+    "mac": {
+      "target": "dmg",
+      "icon": "deepsky.png",
+      "category": "public.app-category.developer-tools",
+      "artifactName": "${productName}-${version}-mac.${ext}",
+      "identity": null
+    },
+    "dmg": {
+      "title": "${productName} ${version}",
+      "artifactName": "${productName}-${version}.${ext}"
+    },
     "win": {
       "target": "nsis",
       "icon": "deepsky.ico"
