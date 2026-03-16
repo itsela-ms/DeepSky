@@ -26,6 +26,10 @@ async function createSession(id, yamlContent, extras = {}) {
   if (extras.deepskyTitle) {
     await fs.promises.writeFile(path.join(dir, '.deepsky-title'), extras.deepskyTitle, 'utf8');
   }
+  if (extras.events) {
+    const lines = extras.events.map(event => JSON.stringify(event)).join('\n') + '\n';
+    await fs.promises.writeFile(path.join(dir, 'events.jsonl'), lines, 'utf8');
+  }
 }
 
 describe('SessionService', () => {
@@ -130,6 +134,84 @@ describe('SessionService', () => {
       const sessions = await svc.listSessions();
       const sess = sessions.find(s => s.id === 'roundtrip-list');
       expect(sess.cwd).toBe('/updated');
+    });
+  });
+
+  describe('searchSessions', () => {
+    it('finds matches in event transcript content', async () => {
+      await createSession('search-hit', 'summary: first session', {
+        events: [
+          { type: 'user.message', data: { content: 'Looking at deployment statistics for the session' } }
+        ]
+      });
+      await createSession('search-miss', 'summary: second session', {
+        events: [
+          { type: 'user.message', data: { content: 'Nothing relevant here' } }
+        ]
+      });
+
+      const matches = await svc.searchSessions('statistics');
+      expect(matches.map(match => match.id)).toContain('search-hit');
+      expect(matches.map(match => match.id)).not.toContain('search-miss');
+    });
+
+    it('returns a preview for nested event payload matches', async () => {
+      await createSession('nested-hit', 'summary: investigate rollout', {
+        events: [
+          {
+            type: 'assistant.message',
+            data: {
+              sections: [
+                { title: 'Result', body: 'The multitarget publish completed successfully in EU3 yesterday.' }
+              ]
+            }
+          }
+        ]
+      });
+
+      const matches = await svc.searchSessions('eu3');
+      expect(matches).toHaveLength(1);
+      expect(matches[0].id).toBe('nested-hit');
+      expect(matches[0].preview.toLowerCase()).toContain('eu3');
+    });
+
+    it('does not match hidden assistant tool request metadata', async () => {
+      await createSession('search-hidden-tool', 'summary: hidden tool request', {
+        events: [
+          {
+            type: 'assistant.message',
+            data: {
+              content: '',
+              toolRequests: [
+                {
+                  name: 'searchSessions',
+                  arguments: {
+                    query: 'phantom-keyword'
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      });
+
+      const matches = await svc.searchSessions('phantom-keyword');
+      expect(matches.map(match => match.id)).not.toContain('search-hidden-tool');
+    });
+  });
+
+  describe('getLastUserPrompt', () => {
+    it('returns the most recent user prompt from the transcript', async () => {
+      await createSession('last-prompt', 'summary: prompt tracking', {
+        events: [
+          { type: 'user.message', data: { content: 'First prompt' } },
+          { type: 'assistant.message', data: { content: 'Working on it' } },
+          { type: 'user.message', data: { transformedContent: 'Second prompt with more detail' } }
+        ]
+      });
+
+      const prompt = await svc.getLastUserPrompt('last-prompt');
+      expect(prompt).toBe('Second prompt with more detail');
     });
   });
 });

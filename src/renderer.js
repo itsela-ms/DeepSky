@@ -3,6 +3,7 @@ const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { deriveSessionState } = require('./session-state');
 const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
+const { collectTerminalSearchMatches } = require('./terminal-search');
 
 // State
 const terminals = new Map();
@@ -21,6 +22,18 @@ const recentlyClosedSessions = []; // stack of session IDs closed by the user
 const sessionLastUsed = new Map();
 let creatingSession = false;
 const ipcCleanups = []; // unsubscribe fns for IPC listeners
+let sidebarSearchResultIds = null;
+let sidebarSearchLoading = false;
+let sidebarSearchTimer = null;
+let sidebarSearchRequestSeq = 0;
+let sidebarCollapsed = false;
+let sidebarHidden = false;
+let lastExpandedSidebarWidth = 280;
+const sessionPromptGhostState = new Map();
+
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 450;
+const SIDEBAR_COLLAPSED_WIDTH = 68;
 
 // Tab group state
 let tabGroups = []; // Array of { id, name, color, collapsed, tabIds }
@@ -66,7 +79,15 @@ const XTERM_THEMES = {
 const sessionList = document.getElementById('session-list');
 const searchInput = document.getElementById('search');
 const searchClear = document.getElementById('search-clear');
+const sidebarSearchToggle = document.getElementById('sidebar-search-toggle');
 const terminalContainer = document.getElementById('terminal-container');
+const terminalPromptGhost = document.getElementById('terminal-prompt-ghost');
+const sessionSearch = document.getElementById('session-search');
+const sessionSearchInput = document.getElementById('session-search-input');
+const sessionSearchCount = document.getElementById('session-search-count');
+const sessionSearchPrev = document.getElementById('session-search-prev');
+const sessionSearchNext = document.getElementById('session-search-next');
+const sessionSearchClose = document.getElementById('session-search-close');
 const terminalTabs = document.getElementById('terminal-tabs');
 const tabsScrollArea = terminalTabs.querySelector('.tabs-scroll-area');
 const tabScrollLeft = terminalTabs.querySelector('.tab-scroll-left');
@@ -104,6 +125,341 @@ async function syncTitlebarPadding() {
   titlebar.style.paddingRight = `${Math.ceil(OVERLAY_BASE_PX / zoom)}px`;
 }
 syncTitlebarPadding();
+
+let sessionSearchMatches = [];
+let sessionSearchIndex = -1;
+
+function getActiveTerminalEntry() {
+  return activeSessionId ? terminals.get(activeSessionId) : null;
+}
+
+function updateSessionSearchUi() {
+  const hasQuery = !!sessionSearchInput.value.trim();
+  const hasMatches = sessionSearchMatches.length > 0;
+  if (!hasQuery) {
+    sessionSearchCount.textContent = '';
+  } else {
+    sessionSearchCount.textContent = hasMatches ? `${sessionSearchIndex + 1}/${sessionSearchMatches.length}` : '0/0';
+  }
+  sessionSearchPrev.disabled = !hasMatches;
+  sessionSearchNext.disabled = !hasMatches;
+}
+
+function clearActiveTerminalSelection() {
+  const entry = getActiveTerminalEntry();
+  if (entry) entry.terminal.clearSelection();
+}
+
+function syncTerminalViewport(sessionId, { refreshSearch = false } = {}) {
+  const entry = terminals.get(sessionId);
+  if (!entry || entry.isSyncingViewport) return;
+
+  entry.isSyncingViewport = true;
+  try {
+    entry.terminal._core?.viewport?.syncScrollArea(true);
+
+    if (
+      refreshSearch &&
+      sessionId === activeSessionId &&
+      !sessionSearch.classList.contains('hidden') &&
+      sessionSearchInput.value.trim()
+    ) {
+      refreshSessionSearch(true);
+    }
+  } finally {
+    entry.isSyncingViewport = false;
+  }
+}
+
+function scheduleTerminalViewportSync(sessionId, { refreshSearch = false } = {}) {
+  const entry = terminals.get(sessionId);
+  if (!entry) return;
+
+  entry.pendingViewportRefreshSearch = entry.pendingViewportRefreshSearch || refreshSearch;
+  if (entry.viewportSyncTimer) clearTimeout(entry.viewportSyncTimer);
+  entry.viewportSyncTimer = setTimeout(() => {
+    entry.viewportSyncTimer = null;
+    const currentEntry = terminals.get(sessionId);
+    if (!currentEntry) return;
+    const shouldRefreshSearch = !!currentEntry.pendingViewportRefreshSearch;
+    currentEntry.pendingViewportRefreshSearch = false;
+
+    requestAnimationFrame(() => {
+      syncTerminalViewport(sessionId, { refreshSearch: shouldRefreshSearch });
+    });
+  }, 20);
+}
+
+function collectSessionSearchMatches(query) {
+  const entry = getActiveTerminalEntry();
+  if (!entry || !query) return [];
+  return collectTerminalSearchMatches(entry.terminal.buffer.active, entry.terminal.cols, query);
+}
+
+function revealSessionSearchMatch(index, keepSearchFocus = false) {
+  if (index < 0 || index >= sessionSearchMatches.length) return false;
+  const entry = getActiveTerminalEntry();
+  const match = sessionSearchMatches[index];
+  if (!entry || !match) return false;
+  const matchSessionId = activeSessionId;
+
+  sessionSearchIndex = index;
+  updateSessionSearchUi();
+
+  const targetViewportY = Math.max(0, match.row - Math.floor(entry.terminal.rows / 2));
+  syncTerminalViewport(matchSessionId);
+  entry.terminal.scrollToLine(targetViewportY);
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (activeSessionId !== matchSessionId) return;
+      const currentEntry = terminals.get(matchSessionId);
+      if (!currentEntry) return;
+      syncTerminalViewport(matchSessionId);
+      currentEntry.terminal.clearSelection();
+      currentEntry.terminal.select(match.col, match.row, match.length);
+      if (keepSearchFocus) sessionSearchInput.focus();
+      else currentEntry.terminal.focus();
+    });
+  });
+
+  return true;
+}
+
+function refreshSessionSearch(preserveIndex = false) {
+  const trimmed = sessionSearchInput.value.trim();
+  if (!trimmed || !activeSessionId) {
+    sessionSearchMatches = [];
+    sessionSearchIndex = -1;
+    clearActiveTerminalSelection();
+    updateSessionSearchUi();
+    return;
+  }
+
+  const previousIndex = preserveIndex ? sessionSearchIndex : -1;
+  sessionSearchMatches = collectSessionSearchMatches(trimmed);
+  if (!sessionSearchMatches.length) {
+    sessionSearchIndex = -1;
+    clearActiveTerminalSelection();
+    updateSessionSearchUi();
+    return;
+  }
+
+  const nextIndex = previousIndex >= 0
+    ? Math.min(previousIndex, sessionSearchMatches.length - 1)
+    : 0;
+  revealSessionSearchMatch(nextIndex, true);
+}
+
+function stepSessionSearch(direction) {
+  if (!sessionSearchMatches.length) {
+    refreshSessionSearch(false);
+    return;
+  }
+  const nextIndex = sessionSearchIndex < 0
+    ? 0
+    : (sessionSearchIndex + direction + sessionSearchMatches.length) % sessionSearchMatches.length;
+  revealSessionSearchMatch(nextIndex, true);
+}
+
+function openSessionSearch() {
+  if (!activeSessionId || !terminals.has(activeSessionId)) {
+    focusSidebarSearch();
+    return;
+  }
+
+  sessionSearch.classList.remove('hidden');
+  updateSessionSearchUi();
+  refreshSessionSearch(true);
+  requestAnimationFrame(() => {
+    sessionSearchInput.focus();
+    sessionSearchInput.select();
+  });
+}
+
+function closeSessionSearch({ restoreTerminalFocus = true } = {}) {
+  sessionSearch.classList.add('hidden');
+  sessionSearchInput.value = '';
+  sessionSearchMatches = [];
+  sessionSearchIndex = -1;
+  clearActiveTerminalSelection();
+  updateSessionSearchUi();
+
+  if (restoreTerminalFocus) {
+    const entry = getActiveTerminalEntry();
+    if (entry) entry.terminal.focus();
+  }
+}
+
+function getSessionPromptGhost(sessionId) {
+  if (!sessionPromptGhostState.has(sessionId)) {
+    sessionPromptGhostState.set(sessionId, {
+      lastPrompt: '',
+      isTyping: false,
+      requestSeq: 0
+    });
+  }
+  return sessionPromptGhostState.get(sessionId);
+}
+
+function updateSessionPromptGhost(sessionId) {
+  if (!terminalPromptGhost) return;
+
+  if (!sessionId || sessionId !== activeSessionId) {
+    terminalPromptGhost.innerHTML = '';
+    terminalPromptGhost.classList.add('empty');
+    return;
+  }
+
+  const session = allSessions.find(s => s.id === sessionId);
+  const title = session?.title || 'New Session';
+  const shortId = sessionId.substring(0, 8);
+  const state = getSessionPromptGhost(sessionId);
+  const lastPrompt = state.lastPrompt || '';
+
+  const esc = (s) => { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; };
+
+  let html = `<span class="info-title">${esc(title)}</span>`;
+  if (lastPrompt) {
+    html += `<span class="info-divider">│</span>`;
+    html += `<span class="info-prompt" title="${esc(lastPrompt)}">💬 ${esc(lastPrompt)}</span>`;
+  }
+
+  terminalPromptGhost.innerHTML = html;
+  terminalPromptGhost.classList.remove('empty');
+}
+
+function scheduleSessionPromptGhostRefresh(sessionId, delays = [0, 400, 1200]) {
+  const state = getSessionPromptGhost(sessionId);
+  const requestId = ++state.requestSeq;
+  const runRefresh = async () => {
+    try {
+      const lastPrompt = await window.api.getLastUserPrompt(sessionId);
+      const currentState = getSessionPromptGhost(sessionId);
+      if (currentState.requestSeq !== requestId) return;
+      currentState.lastPrompt = lastPrompt || '';
+      updateSessionPromptGhost(sessionId);
+    } catch {
+      // Ignore transient transcript-read failures.
+    }
+  };
+
+  for (const delay of delays) {
+    setTimeout(runRefresh, delay);
+  }
+}
+
+function handleSessionPromptInput(sessionId, data) {
+  const state = getSessionPromptGhost(sessionId);
+  if (!data) return;
+
+  if (data.includes('\r') || data.includes('\n')) {
+    state.isTyping = false;
+    // Transcript takes time to be written after send — use longer delays
+    scheduleSessionPromptGhostRefresh(sessionId, [800, 2000, 5000]);
+    return;
+  }
+
+  state.isTyping = true;
+}
+
+function matchesSidebarMetadata(session, queryLower) {
+  if (session.title.toLowerCase().includes(queryLower)) return true;
+  if (session.cwd && session.cwd.toLowerCase().includes(queryLower)) return true;
+  if (session.tags && session.tags.some(tag => tag.toLowerCase().includes(queryLower))) return true;
+  if (session.resources && session.resources.some(resource =>
+    String(resource.id || '').toLowerCase().includes(queryLower) ||
+    String(resource.url || '').toLowerCase().includes(queryLower) ||
+    String(resource.name || '').toLowerCase().includes(queryLower) ||
+    String(resource.repo || '').toLowerCase().includes(queryLower)
+  )) {
+    return true;
+  }
+  return false;
+}
+
+function queueSidebarSearch(query) {
+  if (sidebarSearchTimer) clearTimeout(sidebarSearchTimer);
+  const needle = query.trim();
+  const requestId = ++sidebarSearchRequestSeq;
+
+  if (!needle) {
+    sidebarSearchLoading = false;
+    sidebarSearchResultIds = null;
+    renderSessionList();
+    return;
+  }
+
+  sidebarSearchLoading = true;
+  renderSessionList();
+  sidebarSearchTimer = setTimeout(async () => {
+    try {
+      const results = await window.api.searchSessions(needle);
+      if (requestId !== sidebarSearchRequestSeq) return;
+      sidebarSearchResultIds = new Set(results.map(result => result.id));
+    } catch {
+      if (requestId !== sidebarSearchRequestSeq) return;
+      sidebarSearchResultIds = null;
+    } finally {
+      if (requestId === sidebarSearchRequestSeq) {
+        sidebarSearchLoading = false;
+        renderSessionList();
+      }
+    }
+  }, 120);
+}
+
+function syncSidebarCollapsedUi() {
+  lastExpandedSidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, lastExpandedSidebarWidth));
+  sidebar.classList.toggle('collapsed', sidebarCollapsed && !sidebarHidden);
+  sidebar.classList.toggle('hidden-full', sidebarHidden);
+  resizeHandle.classList.toggle('collapsed', sidebarCollapsed || sidebarHidden);
+  resizeHandle.classList.toggle('sidebar-hidden', sidebarHidden);
+  if (sidebarHidden) {
+    sidebar.style.width = '0px';
+  } else {
+    sidebar.style.width = `${sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : lastExpandedSidebarWidth}px`;
+  }
+}
+
+function setSidebarCollapsed(collapsed, { persist = true } = {}) {
+  if (collapsed === sidebarCollapsed && sidebar.style.width) {
+    syncSidebarCollapsedUi();
+    return;
+  }
+
+  if (collapsed) {
+    const currentWidth = parseInt(sidebar.style.width, 10) || Math.round(sidebar.getBoundingClientRect().width) || lastExpandedSidebarWidth;
+    if (currentWidth >= SIDEBAR_MIN_WIDTH) lastExpandedSidebarWidth = currentWidth;
+  }
+
+  sidebarCollapsed = collapsed;
+  syncSidebarCollapsedUi();
+
+  if (window._cachedSettings) {
+    window._cachedSettings.sidebarCollapsed = collapsed;
+    window._cachedSettings.sidebarWidth = lastExpandedSidebarWidth;
+  }
+
+  if (persist) window.api.updateSettings({ sidebarCollapsed: collapsed });
+  renderSessionList();
+  fitActiveTerminal();
+}
+
+function persistSidebarWidth(width) {
+  lastExpandedSidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width));
+  if (window._cachedSettings) window._cachedSettings.sidebarWidth = lastExpandedSidebarWidth;
+  window.api.updateSettings({ sidebarWidth: lastExpandedSidebarWidth });
+}
+
+function focusSidebarSearch() {
+  if (sidebarCollapsed) setSidebarCollapsed(false);
+  queueAfterNextPaint(() => {
+    searchInput.focus();
+    searchInput.select();
+    document.getElementById('search-wrapper').classList.add('search-active');
+  });
+}
 
 // Delegated event handling for session list items (avoids per-item listener churn)
 let _titleClickTimeout = null;
@@ -186,9 +542,10 @@ async function init() {
   maxConcurrentInput.value = settings.maxConcurrent;
   promptWorkdirInput.checked = !!settings.promptForWorkdir;
   defaultWorkdirInput.value = settings.defaultWorkdir || '';
-  if (settings.sidebarWidth) {
-    document.getElementById('sidebar').style.width = settings.sidebarWidth + 'px';
-  }
+  lastExpandedSidebarWidth = settings.sidebarWidth || 280;
+  sidebarHidden = !!settings.sidebarCollapsed;
+  sidebarCollapsed = false;
+  syncSidebarCollapsedUi();
   applyTheme(settings.theme || 'mocha');
 
   // Restore last sidebar tab — must be set BEFORE refreshSessionList
@@ -204,22 +561,16 @@ async function init() {
   // Clean up any previous IPC listeners (guards against double-init on reload)
   while (ipcCleanups.length) ipcCleanups.pop()();
 
-  let scrollSyncTimer = null;
   ipcCleanups.push(window.api.onPtyData((sessionId, data) => {
     const entry = terminals.get(sessionId);
-    if (entry) entry.terminal.write(data);
+    if (entry) {
+      entry.terminal.write(data, () => {
+        scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+      });
+    }
     sessionAliveState.add(sessionId);
     sessionBusyState.set(sessionId, true);
     patchSessionStateBadges();
-    // Debounced viewport sync to keep scroll area accurate as content grows
-    if (sessionId === activeSessionId && entry) {
-      if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
-      scrollSyncTimer = setTimeout(() => {
-        scrollSyncTimer = null;
-        const e = terminals.get(activeSessionId);
-        e?.terminal._core?.viewport?.syncScrollArea(true);
-      }, 150);
-    }
   }));
 
   ipcCleanups.push(window.api.onPtyExit((sessionId, exitCode) => {
@@ -229,7 +580,9 @@ async function init() {
     const entry = terminals.get(sessionId);
     if (entry) {
       entry.exited = true;
-      entry.terminal.write(`\r\n\x1b[90m[Session ended with code ${exitCode}]\x1b[0m\r\n`);
+      entry.terminal.write(`\r\n\x1b[90m[Session ended with code ${exitCode}]\x1b[0m\r\n`, () => {
+        scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+      });
       // Dispose terminal after a short delay so the exit message is visible
       entry.exitTimeout = setTimeout(() => {
         const e = terminals.get(sessionId);
@@ -243,6 +596,7 @@ async function init() {
           updateTabScrollButtons();
           if (activeSessionId === sessionId) {
             activeSessionId = null;
+            updateSessionPromptGhost(null);
             const remaining = document.querySelectorAll('.tab');
             if (remaining.length > 0) switchToSession(remaining[remaining.length - 1].dataset.sessionId);
             else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
@@ -278,6 +632,7 @@ async function init() {
     updateTabScrollButtons();
     if (activeSessionId === sessionId) {
       activeSessionId = null;
+      updateSessionPromptGhost(null);
       const remaining = document.querySelectorAll('.tab');
       if (remaining.length > 0) switchToSession(remaining[remaining.length - 1].dataset.sessionId);
       else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
@@ -336,6 +691,20 @@ async function init() {
     statusPanel.classList.add('collapsed');
     btnToggleStatus.classList.remove('active');
     fitActiveTerminal();
+  });
+  statusPanelBody.addEventListener('click', async (event) => {
+    const copyButton = event.target.closest('.status-copy-session-id');
+    if (!copyButton) return;
+
+    const sessionId = copyButton.dataset.sessionId;
+    if (!sessionId) return;
+
+    try {
+      await window.api.copyText(sessionId);
+      showToast({ type: 'success', title: 'Session ID copied', body: sessionId });
+    } catch {
+      showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
+    }
   });
 
   // Tab scroll buttons
@@ -537,6 +906,7 @@ async function refreshSessionList() {
     if (!validIds.has(id)) sessionLastUsed.delete(id);
   }
   await updateSessionBusyStates();
+  if (searchQuery) queueSidebarSearch(searchQuery);
   scheduleRenderSessionList();
   if (!activeSessionId) emptyState.classList.remove('hidden');
 }
@@ -627,7 +997,7 @@ function scheduleRenderSessionList() {
   });
 }
 
-function createSessionItem(session, group) {
+function createSessionItem(session, group, index) {
   const el = document.createElement('div');
   el.className = 'session-item';
   el.dataset.sessionId = session.id;
@@ -690,6 +1060,7 @@ function createSessionItem(session, group) {
   }
 
   el.innerHTML = `
+    <div class="session-collapsed-index" title="${escapeHtml(`Session ${index + 1}`)}">${index + 1}</div>
     <div class="session-header-row">
       <div class="session-title" data-title="${escapeHtml(session.title)}">${escapeHtml(session.title)}</div>
       <span class="session-state ${stateCls}" title="${escapeHtml(stateTip)}">${stateLabel}</span>
@@ -702,6 +1073,7 @@ function createSessionItem(session, group) {
 
   el.setAttribute('tabindex', '0');
   el.setAttribute('role', 'button');
+  el.title = session.title;
 
   // Drag-and-drop + context menu for active sessions
   if (currentSidebarTab === 'active') {
@@ -772,14 +1144,8 @@ function renderSessionList() {
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
     displayed = displayed.filter(s => {
-      if (s.title.toLowerCase().includes(q)) return true;
-      if (s.tags && s.tags.some(t => t.toLowerCase().includes(q))) return true;
-      if (s.resources && s.resources.some(r =>
-        (r.id && r.id.includes(q)) ||
-        (r.url && r.url.toLowerCase().includes(q)) ||
-        (r.name && r.name.toLowerCase().includes(q)) ||
-        (r.repo && r.repo.toLowerCase().includes(q))
-      )) return true;
+      if (matchesSidebarMetadata(s, q)) return true;
+      if (sidebarSearchResultIds && sidebarSearchResultIds.has(s.id)) return true;
       return false;
     });
   }
@@ -789,14 +1155,23 @@ function renderSessionList() {
   if (displayed.length === 0) {
     const emptyEl = document.createElement('div');
     emptyEl.className = 'empty-list';
-    emptyEl.textContent = currentSidebarTab === 'active'
-      ? 'No active sessions. Click a session in History or start a new one.'
-      : searchQuery ? 'No sessions match your search.' : 'No sessions found.';
+    emptyEl.textContent = sidebarSearchLoading
+      ? 'Searching sessions...'
+      : currentSidebarTab === 'active'
+        ? 'No active sessions. Click a session in History or start a new one.'
+        : searchQuery ? 'No sessions match your search.' : 'No sessions found.';
     sessionList.appendChild(emptyEl);
     return;
   }
 
-  if (currentSidebarTab === 'active' && tabGroups.length > 0 && !searchQuery) {
+  let displayIndex = 0;
+  const appendSessionItem = (session, group = null) => {
+    const el = createSessionItem(session, group, displayIndex);
+    displayIndex += 1;
+    sessionList.appendChild(el);
+  };
+
+  if (currentSidebarTab === 'active' && tabGroups.length > 0 && !searchQuery && !sidebarCollapsed) {
     // Render grouped sessions
     const displayedIds = new Set(displayed.map(s => s.id));
 
@@ -852,8 +1227,7 @@ function renderSessionList() {
       // Group sessions (if not collapsed)
       if (!group.collapsed) {
         for (const session of groupSessions) {
-          const el = createSessionItem(session, group);
-          sessionList.appendChild(el);
+          appendSessionItem(session, group);
         }
       }
     }
@@ -862,14 +1236,12 @@ function renderSessionList() {
     const groupedIds = new Set(tabGroups.flatMap(g => g.tabIds));
     const ungrouped = displayed.filter(s => !groupedIds.has(s.id));
     for (const session of ungrouped) {
-      const el = createSessionItem(session, null);
-      sessionList.appendChild(el);
+      appendSessionItem(session);
     }
   } else {
     // Original rendering (history tab or search active)
     for (const session of displayed) {
-      const el = createSessionItem(session, null);
-      sessionList.appendChild(el);
+      appendSessionItem(session);
     }
   }
 
@@ -936,7 +1308,9 @@ async function handleCwdClick(sessionId) {
     if (isAlive) {
       const entry = terminals.get(sessionId);
       if (entry) {
-        entry.terminal.write('\r\n\x1b[90m[Changing working directory…]\x1b[0m\r\n');
+        entry.terminal.write('\r\n\x1b[90m[Changing working directory…]\x1b[0m\r\n', () => {
+          scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+        });
       }
       cwdChangingSessions.add(sessionId);
       try {
@@ -1106,8 +1480,23 @@ function createTerminal(sessionId) {
   terminal.open(wrapper);
   fitAddon.fit();
 
-  terminal.onData((data) => window.api.writePty(sessionId, data));
-  terminal.onResize(({ cols, rows }) => window.api.resizePty(sessionId, cols, rows));
+  const promptGhost = document.createElement('div');
+  promptGhost.className = 'terminal-prompt-ghost';
+  wrapper.appendChild(promptGhost);
+
+  terminal.onData((data) => {
+    handleSessionPromptInput(sessionId, data);
+    window.api.writePty(sessionId, data);
+  });
+  terminal.onResize(({ cols, rows }) => {
+    window.api.resizePty(sessionId, cols, rows);
+    scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+  });
+  terminal.onScroll(() => {
+    const currentEntry = terminals.get(sessionId);
+    if (!currentEntry || currentEntry.isSyncingViewport) return;
+    scheduleTerminalViewportSync(sessionId);
+  });
 
   // Defense-in-depth: suppress xterm's native paste handler.
   // Primary fix is in main.js (custom menu without 'paste' role), but this
@@ -1121,9 +1510,20 @@ function createTerminal(sessionId) {
 
   // Intercept terminal shortcuts via the shared helper so local behavior layers on
   // top of main's current shortcut plumbing instead of replacing it.
-  terminal.attachCustomKeyEventHandler(createTerminalKeyHandler(sessionId, terminal, window.api));
+  terminal.attachCustomKeyEventHandler(createTerminalKeyHandler(sessionId, terminal, window.api, {
+    onInput: (data) => handleSessionPromptInput(sessionId, data)
+  }));
 
-  terminals.set(sessionId, { terminal, fitAddon, wrapper });
+  terminals.set(sessionId, {
+    terminal,
+    fitAddon,
+    wrapper,
+    promptGhost,
+    isSyncingViewport: false,
+    pendingViewportRefreshSearch: false
+  });
+  scheduleTerminalViewportSync(sessionId);
+  scheduleSessionPromptGhostRefresh(sessionId, [0, 400]);
 }
 
 function switchToSession(sessionId) {
@@ -1131,6 +1531,7 @@ function switchToSession(sessionId) {
 
   if (activeSessionId && terminals.has(activeSessionId)) {
     terminals.get(activeSessionId).wrapper.classList.remove('visible');
+    updateSessionPromptGhost(activeSessionId);
   }
 
   activeSessionId = sessionId;
@@ -1145,6 +1546,8 @@ function switchToSession(sessionId) {
   const entry = terminals.get(sessionId);
   if (entry) {
     entry.wrapper.classList.add('visible');
+    updateSessionPromptGhost(sessionId);
+    scheduleSessionPromptGhostRefresh(sessionId);
     emptyState.classList.add('hidden');
     const currentId = sessionId;
     requestAnimationFrame(() => {
@@ -1152,7 +1555,9 @@ function switchToSession(sessionId) {
       entry.fitAddon.fit();
       entry.terminal.focus();
       window.api.resizePty(currentId, entry.terminal.cols, entry.terminal.rows);
-      entry.terminal._core?.viewport?.syncScrollArea(true);
+      syncTerminalViewport(currentId);
+      scheduleTerminalViewportSync(currentId, { refreshSearch: true });
+      if (!sessionSearch.classList.contains('hidden')) refreshSessionSearch(true);
     });
   }
 
@@ -1180,8 +1585,11 @@ function patchActiveHighlight() {
 function showHome() {
   if (activeSessionId && terminals.has(activeSessionId)) {
     terminals.get(activeSessionId).wrapper.classList.remove('visible');
+    updateSessionPromptGhost(activeSessionId);
   }
+  closeSessionSearch({ restoreTerminalFocus: false });
   activeSessionId = null;
+  updateSessionPromptGhost(null);
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   emptyState.classList.remove('hidden');
   updateStatusPanel(null);
@@ -1275,10 +1683,12 @@ async function closeTab(sessionId) {
 
   if (activeSessionId === sessionId) {
     activeSessionId = null;
+    updateSessionPromptGhost(null);
     const remainingTabs = document.querySelectorAll('.tab');
     if (remainingTabs.length > 0) {
       switchToSession(remainingTabs[remainingTabs.length - 1].dataset.sessionId);
     } else {
+      closeSessionSearch({ restoreTerminalFocus: false });
       emptyState.classList.remove('hidden');
       updateStatusPanel(null);
     }
@@ -1763,10 +2173,17 @@ async function updateStatusPanel(sessionId) {
   }
 
   // Summary section
-  if (status.summary) {
-    const summaryContent = `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`;
-    html += renderStatusSection('summary', '📝', 'Summary', null, summaryContent);
-  }
+  const summaryText = status.summary?.text
+    ? `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`
+    : '<div class="status-summary-empty">No summary yet for this session.</div>';
+  const summaryMeta = `<div class="status-summary-meta">
+      <span class="status-summary-id" title="${escapeHtml(sessionId)}">
+        <span class="status-summary-id-label">🆔 Session ID</span>
+        <code>${escapeHtml(sessionId)}</code>
+      </span>
+      <button class="status-copy-session-id" type="button" data-session-id="${escapeHtml(sessionId)}" title="Copy session ID">Copy</button>
+    </div>`;
+  html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
 
   // Next steps
   if (status.nextSteps.length > 0) {
@@ -1865,13 +2282,14 @@ function fitActiveTerminal() {
     entry.fitAddon.fit();
     window.api.resizePty(activeSessionId, entry.terminal.cols, entry.terminal.rows);
     // Force viewport scroll area sync even when fit() is a no-op (same cols/rows).
-    entry.terminal._core?.viewport?.syncScrollArea(true);
+    syncTerminalViewport(activeSessionId);
     // Reset any horizontal scroll offset that xterm's viewport may have retained
     // from a wider column count (e.g. when status panel opens and narrows the container).
     const viewport = entry.terminal.element?.querySelector('.xterm-viewport');
     if (viewport) viewport.scrollLeft = 0;
     const screen = entry.terminal.element?.querySelector('.xterm-screen');
     if (screen) screen.style.width = '';
+    scheduleTerminalViewportSync(activeSessionId, { refreshSearch: true });
   }
 }
 
@@ -2188,9 +2606,13 @@ function shortenPath(p) {
 const resizeHandle = document.getElementById('resize-handle');
 const sidebar = document.getElementById('sidebar');
 let isResizing = false;
+let resizeStartX = 0;
+let resizeDidDrag = false;
 
-resizeHandle.addEventListener('mousedown', () => {
+resizeHandle.addEventListener('mousedown', (e) => {
   isResizing = true;
+  resizeStartX = e.clientX;
+  resizeDidDrag = false;
   resizeHandle.classList.add('dragging');
   document.body.style.cursor = 'col-resize';
   document.body.style.userSelect = 'none';
@@ -2198,8 +2620,38 @@ resizeHandle.addEventListener('mousedown', () => {
 
 document.addEventListener('mousemove', (e) => {
   if (!isResizing) return;
-  const newWidth = Math.max(200, Math.min(450, e.clientX));
-  sidebar.style.width = newWidth + 'px';
+  if (!resizeDidDrag && Math.abs(e.clientX - resizeStartX) > 3) resizeDidDrag = true;
+  if (!resizeDidDrag) return;
+  // Un-hide on drag
+  if (sidebarHidden) {
+    sidebarHidden = false;
+    sidebarCollapsed = false;
+    syncSidebarCollapsedUi();
+  }
+
+  const rawWidth = e.clientX;
+
+  if (rawWidth <= SIDEBAR_COLLAPSED_WIDTH) {
+    // Dragged very small → snap to collapsed icon mode
+    if (!sidebarCollapsed) {
+      sidebarCollapsed = true;
+      syncSidebarCollapsedUi();
+    }
+  } else if (rawWidth < SIDEBAR_MIN_WIDTH) {
+    // Between collapsed and min → stay collapsed
+    if (!sidebarCollapsed) {
+      sidebarCollapsed = true;
+      syncSidebarCollapsedUi();
+    }
+  } else {
+    // Normal range → expand
+    if (sidebarCollapsed) {
+      sidebarCollapsed = false;
+      syncSidebarCollapsedUi();
+    }
+    const newWidth = Math.min(SIDEBAR_MAX_WIDTH, rawWidth);
+    sidebar.style.width = newWidth + 'px';
+  }
 });
 
 document.addEventListener('mouseup', () => {
@@ -2209,8 +2661,22 @@ document.addEventListener('mouseup', () => {
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
 
-    const width = parseInt(sidebar.style.width, 10);
-    if (width) window.api.updateSettings({ sidebarWidth: width });
+    if (!resizeDidDrag) {
+      // Click → toggle full hide
+      sidebarHidden = !sidebarHidden;
+      if (sidebarHidden) sidebarCollapsed = false;
+      syncSidebarCollapsedUi();
+      window.api.updateSettings({ sidebarCollapsed: sidebarHidden });
+    } else {
+      const width = parseInt(sidebar.style.width, 10);
+      if (sidebarCollapsed) {
+        window.api.updateSettings({ sidebarCollapsed: false });
+      } else if (width) {
+        persistSidebarWidth(width);
+        if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = false;
+        window.api.updateSettings({ sidebarCollapsed: false });
+      }
+    }
 
     fitActiveTerminal();
   }
@@ -2220,6 +2686,7 @@ document.addEventListener('mouseup', () => {
 searchInput.addEventListener('input', (e) => {
   searchQuery = e.target.value;
   searchClear.classList.toggle('hidden', !searchQuery);
+  queueSidebarSearch(searchQuery);
   renderSessionList();
 });
 searchInput.addEventListener('focus', () => {
@@ -2232,9 +2699,28 @@ searchClear.addEventListener('click', () => {
   searchInput.value = '';
   searchQuery = '';
   searchClear.classList.add('hidden');
+  queueSidebarSearch('');
   renderSessionList();
   searchInput.focus();
 });
+sidebarSearchToggle.addEventListener('click', () => focusSidebarSearch());
+sessionSearchInput.addEventListener('input', () => {
+  refreshSessionSearch(false);
+});
+sessionSearchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    e.stopPropagation();
+    stepSessionSearch(e.shiftKey ? -1 : 1);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSessionSearch();
+  }
+});
+sessionSearchPrev.addEventListener('click', () => stepSessionSearch(-1));
+sessionSearchNext.addEventListener('click', () => stepSessionSearch(1));
+sessionSearchClose.addEventListener('click', () => closeSessionSearch());
 btnNew.addEventListener('click', newSession);
 btnNewCenter.addEventListener('click', newSession);
 
@@ -2464,15 +2950,18 @@ document.addEventListener('keydown', (e) => {
     toggleStatusPanel();
   }
 
-  // Ctrl/Cmd+F: Focus search bar
-  if (mod && e.key === 'f') {
+  // Ctrl/Cmd+F: Open in-session search when a session is active
+  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
     e.preventDefault();
-    searchInput.focus();
-    searchInput.select();
-    document.getElementById('search-wrapper').classList.add('search-active');
+    if (activeSessionId && terminals.has(activeSessionId)) openSessionSearch();
+    else focusSidebarSearch();
   }
 
   if (e.key === 'Escape') {
+    if (!sessionSearch.classList.contains('hidden')) {
+      closeSessionSearch();
+      return;
+    }
     // Close context menu first if open
     const ctxMenu = document.getElementById('tab-context-menu');
     if (ctxMenu) {
