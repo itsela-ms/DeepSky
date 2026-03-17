@@ -2,21 +2,25 @@ const EventEmitter = require('events');
 const crypto = require('crypto');
 
 const os = require('os');
+const { buildCopilotLaunchEnv } = require('./copilot-path');
 
 // Default to node-pty, but allow injection for testing
 let defaultPty;
 try { defaultPty = require('node-pty'); } catch { defaultPty = null; }
 
 class PtyManager extends EventEmitter {
-  constructor(copilotPath, settingsService, ptyModule) {
+  constructor(copilotPath, settingsService, ptyModule, runtime = {}) {
     super();
     this.copilotPath = copilotPath;
     this.sessions = new Map();
     this.settingsService = settingsService;
     this._pty = ptyModule || defaultPty;
+    this._platform = runtime.platform || process.platform;
+    this._env = runtime.env || process.env;
+    this._homedir = runtime.homedir || os.homedir();
 
     // On Windows, .cmd files must be spawned via cmd.exe
-    this._useCmd = process.platform === 'win32' &&
+    this._useCmd = this._platform === 'win32' &&
       copilotPath.toLowerCase().endsWith('.cmd');
     this._standby = null;
   }
@@ -30,6 +34,36 @@ class PtyManager extends EventEmitter {
       return { file: 'cmd.exe', args: ['/c', this.copilotPath, ...extraArgs] };
     }
     return { file: this.copilotPath, args: extraArgs };
+  }
+
+  _spawnOptions(cwd) {
+    return {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd,
+      env: buildCopilotLaunchEnv({
+        platform: this._platform,
+        env: this._env,
+        homedir: this._homedir,
+        executablePath: this.copilotPath,
+        extraEnv: { TERM: 'xterm-256color' },
+      }),
+    };
+  }
+
+  _spawnSession(extraArgs, cwd) {
+    const { file, args } = this._spawnArgs(extraArgs);
+    return this._pty.spawn(file, args, this._spawnOptions(cwd));
+  }
+
+  _formatSpawnError(sessionId, err) {
+    const message = err?.message || String(err);
+    const missingCli = /not found|enoent|spawn/i.test(message);
+    const guidance = missingCli
+      ? ' Ensure GitHub Copilot CLI is installed and available on this Mac.'
+      : '';
+    return `Failed to spawn PTY for session ${sessionId}: ${message}.${guidance}`.replace('..', '.');
   }
 
   get maxConcurrent() {
@@ -50,34 +84,20 @@ class PtyManager extends EventEmitter {
     // Evict oldest if at max capacity
     this._evictIfNeeded();
 
-    const spawnCwd = cwd || os.homedir();
+    const spawnCwd = cwd || this._homedir;
     let ptyProcess;
     try {
-      const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
-      ptyProcess = this._pty.spawn(file, args, {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 40,
-        cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
-      });
+      ptyProcess = this._spawnSession(['--resume', sessionId, '--yolo'], spawnCwd);
     } catch (err) {
       // If spawn fails with given cwd, retry with homedir
-      if (cwd && cwd !== os.homedir()) {
+      if (cwd && cwd !== this._homedir) {
         try {
-          const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
-          ptyProcess = this._pty.spawn(file, args, {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
-            cwd: os.homedir(),
-            env: { ...process.env, TERM: 'xterm-256color' }
-          });
+          ptyProcess = this._spawnSession(['--resume', sessionId, '--yolo'], this._homedir);
         } catch (err2) {
-          throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err2.message}`);
+          throw new Error(this._formatSpawnError(sessionId, err2));
         }
       } else {
-        throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err.message}`);
+        throw new Error(this._formatSpawnError(sessionId, err));
       }
     }
 
@@ -125,33 +145,19 @@ class PtyManager extends EventEmitter {
 
     this._evictIfNeeded();
 
-    const spawnCwd = cwd || os.homedir();
+    const spawnCwd = cwd || this._homedir;
     let ptyProcess;
     try {
-      const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
-      ptyProcess = this._pty.spawn(file, args, {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 40,
-        cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
-      });
+      ptyProcess = this._spawnSession(['--resume', sessionId, '--yolo'], spawnCwd);
     } catch (err) {
-      if (cwd && cwd !== os.homedir()) {
+      if (cwd && cwd !== this._homedir) {
         try {
-          const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
-          ptyProcess = this._pty.spawn(file, args, {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
-            cwd: os.homedir(),
-            env: { ...process.env, TERM: 'xterm-256color' }
-          });
+          ptyProcess = this._spawnSession(['--resume', sessionId, '--yolo'], this._homedir);
         } catch (err2) {
-          throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err2.message}`);
+          throw new Error(this._formatSpawnError(sessionId, err2));
         }
       } else {
-        throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err.message}`);
+        throw new Error(this._formatSpawnError(sessionId, err));
       }
     }
 
@@ -222,16 +228,9 @@ class PtyManager extends EventEmitter {
     if (aliveCount >= this.maxConcurrent) return;
 
     const sessionId = this._generateId();
-    const spawnCwd = cwd || os.homedir();
+    const spawnCwd = cwd || this._homedir;
     try {
-      const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
-      const ptyProcess = this._pty.spawn(file, args, {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 40,
-        cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
-      });
+      const ptyProcess = this._spawnSession(['--resume', sessionId, '--yolo'], spawnCwd);
 
       const entry = {
         id: sessionId,
@@ -265,7 +264,7 @@ class PtyManager extends EventEmitter {
     const standby = this._standby;
     if (!standby || !standby.alive) return null;
 
-    const spawnCwd = cwd || os.homedir();
+    const spawnCwd = cwd || this._homedir;
     if (standby.cwd !== spawnCwd) {
       // CWD mismatch — discard standby
       try { standby.pty.kill(); } catch {}

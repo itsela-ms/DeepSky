@@ -1023,6 +1023,12 @@ async function openSession(sessionId) {
     saveTabState();
     // Wait for rAF focus to complete
     await new Promise(resolve => requestAnimationFrame(resolve));
+  } catch (error) {
+    showToast({
+      type: 'error',
+      title: 'Failed to open session',
+      body: error?.message || 'DeepSky could not restore this session.',
+    });
   } finally {
     openingSession.delete(sessionId);
   }
@@ -1076,6 +1082,12 @@ async function newSession() {
     const termEntry = terminals.get(sessionId);
     if (termEntry) termEntry.titlePoll = titlePoll;
     saveTabState();
+  } catch (error) {
+    showToast({
+      type: 'error',
+      title: 'Failed to create session',
+      body: error?.message || 'DeepSky could not start a new session.',
+    });
   } finally {
     creatingSession = false;
   }

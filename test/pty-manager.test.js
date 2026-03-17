@@ -16,9 +16,14 @@ function createMockPty() {
 
 const mockPtyModule = { spawn: vi.fn(() => createMockPty()) };
 
-function createManager(maxConcurrent = 5) {
+function createManager(maxConcurrent = 5, options = {}) {
   const settingsService = { get: () => ({ maxConcurrent }) };
-  return new PtyManager('/fake/copilot', settingsService, mockPtyModule);
+  return new PtyManager(
+    options.copilotPath || '/fake/copilot',
+    settingsService,
+    options.ptyModule || mockPtyModule,
+    options.runtime
+  );
 }
 
 function getPty(manager, sessionId) {
@@ -262,6 +267,27 @@ describe('PtyManager', () => {
 
       // Restore default
       mockPtyModule.spawn.mockImplementation(() => createMockPty());
+    });
+
+    it('adds common macOS paths when spawning copilot', () => {
+      mockPtyModule.spawn.mockClear();
+      manager = createManager(5, {
+        copilotPath: '/opt/homebrew/bin/copilot',
+        runtime: {
+          platform: 'darwin',
+          env: { PATH: '/usr/bin:/bin' },
+          homedir: '/Users/tester',
+        },
+      });
+
+      manager.newSession('/my/project');
+
+      const callArgs = mockPtyModule.spawn.mock.calls[0];
+      const pathParts = callArgs[2].env.PATH.split(':');
+      expect(pathParts[0]).toBe('/opt/homebrew/bin');
+      expect(pathParts).toContain('/usr/local/bin');
+      expect(pathParts).toContain('/Users/tester/.local/bin');
+      expect(callArgs[2].env.TERM).toBe('xterm-256color');
     });
   });
 
