@@ -2,7 +2,7 @@ name: Build & Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, user/omerbraha/mac-installable-build]
     tags: ['v*']
   workflow_dispatch:
 
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -38,8 +38,78 @@ jobs:
             release/*.blockmap
           if-no-files-found: warn
 
+  build-macos:
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      CSC_NAME: ${{ secrets.CSC_NAME }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Prepare mac signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CSC_LINK:-}" || -z "${CSC_KEY_PASSWORD:-}" ]]; then
+            echo "Missing required GitHub secrets: CSC_LINK and CSC_KEY_PASSWORD." >&2
+            exit 1
+          fi
+
+          if [[ -n "${APPLE_API_KEY_CONTENT:-}" ]]; then
+            if [[ -z "${APPLE_API_KEY_ID:-}" || -z "${APPLE_API_ISSUER:-}" ]]; then
+              echo "APPLE_API_KEY_ID and APPLE_API_ISSUER are required when APPLE_API_KEY is provided." >&2
+              exit 1
+            fi
+
+            key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "$APPLE_API_KEY_CONTENT" > "$key_path"
+            chmod 600 "$key_path"
+
+            {
+              echo "APPLE_API_KEY=$key_path"
+              echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            } >> "$GITHUB_ENV"
+          else
+            if [[ -z "${APPLE_ID:-}" || -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" || -z "${APPLE_TEAM_ID:-}" ]]; then
+              echo "Missing notarization secrets. Provide either APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID." >&2
+              exit 1
+            fi
+          fi
+
+      - run: npm run dist:mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macOS
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+            release/*.blockmap
+          if-no-files-found: warn
+
   release:
-    needs: build
+    needs: [build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
