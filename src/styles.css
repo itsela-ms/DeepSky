@@ -841,6 +841,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 #terminal-container {
@@ -861,8 +862,12 @@ body {
   display: block;
 }
 
-/* Session info bar — always visible below the terminal */
+/* Session info bar — pinned to bottom of terminal column, overlaps the sub-row gap */
 .terminal-prompt-ghost {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   gap: 0;
@@ -880,9 +885,14 @@ body {
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent),
     0 -1px 0 color-mix(in srgb, var(--bg-overlay) 30%, transparent);
-  flex-shrink: 0;
   min-height: 28px;
   overflow: hidden;
+  z-index: 10;
+}
+
+/* Fill any sub-row gap between the last xterm row and the info bar */
+#terminal-container {
+  background: var(--term-bg);
 }
 
 .terminal-prompt-ghost .info-badge {
