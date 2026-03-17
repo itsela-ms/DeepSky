@@ -2,7 +2,7 @@ name: Build & Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, user/omerbraha/mac-bypass-build]
     tags: ['v*']
   workflow_dispatch:
 
