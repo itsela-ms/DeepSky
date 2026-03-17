@@ -11,6 +11,7 @@ const StatusService = require('./status-service');
 const SettingsService = require('./settings-service');
 const NotificationService = require('./notification-service');
 const UpdateService = require('./update-service');
+const { resolveCopilotPath } = require('./copilot-path');
 
 // Prevent Chromium GPU compositing artifacts(rectangular patches of wrong shade on dark backgrounds)
 app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -93,33 +94,6 @@ const SESSION_STATE_DIR = path.join(os.homedir(), '.copilot', 'session-state');
 const COPILOT_CONFIG_DIR = path.join(os.homedir(), '.copilot');
 const NOTIFICATIONS_DIR = path.join(COPILOT_CONFIG_DIR, 'notifications');
 const INSTRUCTIONS_PATH = path.join(COPILOT_CONFIG_DIR, 'copilot-instructions.md');
-
-function resolveCopilotPath() {
-  const { execSync } = require('child_process');
-  // 1. Check PATH for copilot binary (copilot.exe and copilot.cmd on Windows)
-  const names = ['copilot.exe', 'copilot.cmd'];
-  for (const bin of names) {
-    const whichCmd = `where ${bin}`;
-    try {
-      const result = execSync(whichCmd, { encoding: 'utf8', timeout: 5000 }).trim();
-      const firstMatch = result.split(/\r?\n/)[0];
-      if (firstMatch && fs.existsSync(firstMatch)) return firstMatch;
-    } catch {}
-  }
-
-  // 2. Known install locations
-  const candidates = [
-    path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'copilot.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'copilot-cli', 'copilot.exe'),
-    path.join(process.env.PROGRAMFILES || '', 'GitHub Copilot CLI', 'copilot.exe'),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-
-  // 3. Fall back to bare command name — let the OS resolve it at spawn time
-  return bin;
-}
 
 function createWindow() {
   const theme = settingsService.get().theme || 'mocha';
