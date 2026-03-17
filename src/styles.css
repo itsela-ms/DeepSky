@@ -74,6 +74,39 @@ body {
   -webkit-app-region: drag;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
+  transition: height 0.2s ease, opacity 0.2s ease, padding 0.2s ease, border-color 0.2s ease;
+}
+
+#titlebar.titlebar-autohide {
+  height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-color: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#titlebar.titlebar-autohide:hover {
+  height: 36px;
+  opacity: 1;
+  padding: 0 16px;
+  padding-right: 140px;
+  border-bottom-color: var(--border);
+  pointer-events: auto;
+  overflow: visible;
+}
+
+/* Invisible hover target to reveal titlebar */
+#titlebar.titlebar-autohide::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 100;
+  pointer-events: auto;
 }
 
 .titlebar-text {
@@ -828,6 +861,18 @@ body {
   color: var(--bg);
 }
 
+.tab-rename-input {
+  width: 100%;
+  background: var(--bg-overlay);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 1px 4px;
+  outline: none;
+  font-family: inherit;
+}
+
 /* Terminal container */
 #terminal-main-row {
   flex: 1;
@@ -862,7 +907,7 @@ body {
   display: block;
 }
 
-/* Session info bar — pinned to bottom of terminal column, overlaps the sub-row gap */
+/* Session info bar — absolute positioned, thin, over the sub-row gap */
 .terminal-prompt-ghost {
   position: absolute;
   bottom: 0;
@@ -871,8 +916,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0;
-  padding: 5px 12px;
-  font-size: 12px;
+  padding: 0 12px;
+  font-size: 11px;
   line-height: 1.3;
   font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
   color: color-mix(in srgb, var(--text) 82%, var(--text-dim));
@@ -885,7 +930,7 @@ body {
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent),
     0 -1px 0 color-mix(in srgb, var(--bg-overlay) 30%, transparent);
-  min-height: 28px;
+  height: 16px;
   overflow: hidden;
   z-index: 10;
 }

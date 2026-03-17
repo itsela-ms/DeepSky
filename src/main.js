@@ -129,7 +129,7 @@ function createWindow() {
   const winOptions = {
     width: 1400,
     height: 900,
-    minWidth: 900,
+    minWidth: 400,
     minHeight: 600,
     icon: path.join(__dirname, '..', 'deepsky.ico'),
     backgroundColor: bg,
