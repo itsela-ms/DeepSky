@@ -1476,15 +1476,8 @@ function createTerminal(sessionId) {
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
-  let lastOpenedUrl = '';
-  let lastOpenedAt = 0;
-  terminal.loadAddon(new WebLinksAddon((e, uri) => {
-    const now = Date.now();
-    if (uri === lastOpenedUrl && now - lastOpenedAt < 1000) return;
-    lastOpenedUrl = uri;
-    lastOpenedAt = now;
-    window.api.openExternal(uri);
-  }));
+  // WebLinksAddon for hover cursor only — CLI handles actual link opening
+  terminal.loadAddon(new WebLinksAddon(() => {}));
 
   const wrapper = document.createElement('div');
   wrapper.className = 'terminal-wrapper';
