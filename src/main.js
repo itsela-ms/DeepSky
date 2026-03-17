@@ -140,6 +140,18 @@ app.whenReady().then(async () => {
   sessionService = new SessionService(SESSION_STATE_DIR);
   ptyManager = new PtyManager(copilotExe, settingsService);
 
+  // Pre-flight: warn if the terminal backend is missing (asar or native issue)
+  if (!ptyManager._pty) {
+    console.error('[DeepSky] node-pty failed to load — sessions will not work.');
+    dialog.showErrorBox(
+      'Terminal backend unavailable',
+      'DeepSky could not load the terminal engine (node-pty). ' +
+      'Sessions will not work.\n\n' +
+      'This usually means the app was packaged incorrectly. ' +
+      'Please report this issue.'
+    );
+  }
+
   tagIndexer = new TagIndexer(SESSION_STATE_DIR);
   await tagIndexer.init();
 

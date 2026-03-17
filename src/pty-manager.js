@@ -6,7 +6,8 @@ const { buildCopilotLaunchEnv } = require('./copilot-path');
 
 // Default to node-pty, but allow injection for testing
 let defaultPty;
-try { defaultPty = require('node-pty'); } catch { defaultPty = null; }
+let ptyLoadError = null;
+try { defaultPty = require('node-pty'); } catch (e) { defaultPty = null; ptyLoadError = e; }
 
 class PtyManager extends EventEmitter {
   constructor(copilotPath, settingsService, ptyModule, runtime = {}) {
@@ -53,6 +54,10 @@ class PtyManager extends EventEmitter {
   }
 
   _spawnSession(extraArgs, cwd) {
+    if (!this._pty) {
+      const detail = ptyLoadError ? ptyLoadError.message : 'module is null';
+      throw new Error(`Terminal backend (node-pty) failed to load: ${detail}`);
+    }
     const { file, args } = this._spawnArgs(extraArgs);
     return this._pty.spawn(file, args, this._spawnOptions(cwd));
   }
