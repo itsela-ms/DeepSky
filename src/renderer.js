@@ -306,15 +306,18 @@ function getSessionPromptGhost(sessionId) {
 function updateSessionPromptGhost(sessionId) {
   if (!terminalPromptGhost) return;
 
+  // No active session → show empty bar
   if (!sessionId || sessionId !== activeSessionId) {
-    terminalPromptGhost.innerHTML = '';
-    terminalPromptGhost.classList.add('empty');
+    if (!activeSessionId) {
+      terminalPromptGhost.innerHTML = '';
+      terminalPromptGhost.classList.add('empty');
+    }
+    // When switching sessions, don't clear — let the new session's update fill it
     return;
   }
 
   const session = allSessions.find(s => s.id === sessionId);
   const title = session?.title || 'New Session';
-  const shortId = sessionId.substring(0, 8);
   const state = getSessionPromptGhost(sessionId);
   const lastPrompt = state.lastPrompt || '';
 
