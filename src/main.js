@@ -96,29 +96,37 @@ const INSTRUCTIONS_PATH = path.join(COPILOT_CONFIG_DIR, 'copilot-instructions.md
 
 function resolveCopilotPath() {
   const { execSync } = require('child_process');
-  // 1. Check PATH for copilot binary (copilot.exe and copilot.cmd on Windows)
-  const names = ['copilot.exe', 'copilot.cmd'];
+  const isWin = process.platform === 'win32';
+
+  // 1. Check PATH for copilot binary
+  const names = isWin ? ['copilot.exe', 'copilot.cmd'] : ['copilot'];
+  const whichBin = isWin ? 'where' : 'which';
   for (const bin of names) {
-    const whichCmd = `where ${bin}`;
     try {
-      const result = execSync(whichCmd, { encoding: 'utf8', timeout: 5000 }).trim();
+      const result = execSync(`${whichBin} ${bin}`, { encoding: 'utf8', timeout: 5000 }).trim();
       const firstMatch = result.split(/\r?\n/)[0];
       if (firstMatch && fs.existsSync(firstMatch)) return firstMatch;
     } catch {}
   }
 
   // 2. Known install locations
-  const candidates = [
-    path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'copilot.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'copilot-cli', 'copilot.exe'),
-    path.join(process.env.PROGRAMFILES || '', 'GitHub Copilot CLI', 'copilot.exe'),
-  ];
+  const candidates = isWin
+    ? [
+        path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'copilot.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'copilot-cli', 'copilot.exe'),
+        path.join(process.env.PROGRAMFILES || '', 'GitHub Copilot CLI', 'copilot.exe'),
+      ]
+    : [
+        '/opt/homebrew/bin/copilot',
+        '/usr/local/bin/copilot',
+        path.join(os.homedir(), '.local', 'bin', 'copilot'),
+      ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
   }
 
   // 3. Fall back to bare command name — let the OS resolve it at spawn time
-  return bin;
+  return isWin ? 'copilot.exe' : 'copilot';
 }
 
 function createWindow() {
@@ -142,7 +150,9 @@ function createWindow() {
   };
 
   winOptions.titleBarStyle = 'hidden';
-  winOptions.titleBarOverlay = { color: bg, symbolColor: fg, height: 36 };
+  if (process.platform === 'win32') {
+    winOptions.titleBarOverlay = { color: bg, symbolColor: fg, height: 36 };
+  }
 
   mainWindow = new BrowserWindow(winOptions);
 
@@ -292,7 +302,9 @@ app.whenReady().then(async () => {
     if (partial.theme && mainWindow && !mainWindow.isDestroyed()) {
       const bg = partial.theme === 'latte' ? '#eff1f5' : '#1e1e2e';
       const fg = partial.theme === 'latte' ? '#4c4f69' : '#cdd6f4';
-      mainWindow.setTitleBarOverlay({ color: bg, symbolColor: fg });
+      if (process.platform === 'win32') {
+        mainWindow.setTitleBarOverlay({ color: bg, symbolColor: fg });
+      }
       mainWindow.setBackgroundColor(bg);
     }
 
