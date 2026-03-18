@@ -129,7 +129,7 @@ function createWindow() {
   const winOptions = {
     width: 1400,
     height: 900,
-    minWidth: 900,
+    minWidth: 400,
     minHeight: 600,
     icon: path.join(__dirname, '..', 'deepsky.ico'),
     backgroundColor: bg,
@@ -344,9 +344,8 @@ app.whenReady().then(async () => {
 
   // IPC: Open external URL
   ipcMain.handle('shell:openExternal', (event, url) => {
-    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-      shell.openExternal(url);
-    }
+    if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
+    shell.openExternal(url);
   });
 
   // IPC: Notifications

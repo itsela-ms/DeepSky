@@ -419,6 +419,7 @@ function syncSidebarCollapsedUi() {
   sidebar.classList.toggle('hidden-full', sidebarHidden);
   resizeHandle.classList.toggle('collapsed', sidebarCollapsed || sidebarHidden);
   resizeHandle.classList.toggle('sidebar-hidden', sidebarHidden);
+  titlebar.classList.toggle('titlebar-autohide', sidebarHidden);
   if (sidebarHidden) {
     sidebar.style.width = '0px';
   } else {
@@ -1475,7 +1476,8 @@ function createTerminal(sessionId) {
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new WebLinksAddon((e, uri) => window.api.openExternal(uri)));
+  // WebLinksAddon for hover cursor only — CLI handles actual link opening
+  terminal.loadAddon(new WebLinksAddon(() => {}));
 
   const wrapper = document.createElement('div');
   wrapper.className = 'terminal-wrapper';
@@ -1616,7 +1618,17 @@ function addTab(sessionId, title) {
 
   tab.appendChild(titleSpan);
   tab.appendChild(closeBtn);
-  tab.addEventListener('click', () => switchToSession(sessionId));
+  let tabClickTimer = null;
+  tab.addEventListener('click', () => {
+    if (tabClickTimer) clearTimeout(tabClickTimer);
+    tabClickTimer = setTimeout(() => { tabClickTimer = null; switchToSession(sessionId); }, 200);
+  });
+  tab.addEventListener('dblclick', (e) => {
+    if (tabClickTimer) { clearTimeout(tabClickTimer); tabClickTimer = null; }
+    e.stopPropagation();
+    switchToSession(sessionId);
+    startTabRename(sessionId);
+  });
   tab.addEventListener('mousedown', (e) => {
     if (e.button === 1) { // Middle mouse button
       e.preventDefault();
@@ -1626,6 +1638,44 @@ function addTab(sessionId, title) {
 
   tabsScrollArea.appendChild(tab);
   updateTabScrollButtons();
+}
+
+function startTabRename(sessionId) {
+  const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
+  if (!tab) return;
+  const titleSpan = tab.querySelector('.tab-title');
+  if (!titleSpan) return;
+
+  const currentTitle = titleSpan.title || titleSpan.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'tab-rename-input';
+  input.value = currentTitle;
+
+  titleSpan.textContent = '';
+  titleSpan.appendChild(input);
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+
+  const commit = async () => {
+    const newTitle = input.value.trim();
+    if (newTitle && newTitle !== currentTitle) {
+      await window.api.renameSession(sessionId, newTitle);
+      await refreshSessionList();
+    } else {
+      updateTabTitle(sessionId, currentTitle);
+    }
+  };
+
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.value = currentTitle; input.blur(); }
+    e.stopPropagation();
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
 }
 
 function updateTabTitle(sessionId, title) {
