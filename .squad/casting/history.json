@@ -1,0 +1,10 @@
+{
+  "assignments": [
+    {
+      "assignment_id": "deepsky-001",
+      "universe": "nexus-data-team",
+      "created_at": "2026-03-22",
+      "agents": ["Nir", "Ravid", "Tomer", "George", "Eden", "Efrat"]
+    }
+  ]
+}

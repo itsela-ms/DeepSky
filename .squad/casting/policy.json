@@ -1,0 +1,5 @@
+{
+  "universes": ["nexus-data-team"],
+  "max_capacity": 8,
+  "allow_custom": true
+}
