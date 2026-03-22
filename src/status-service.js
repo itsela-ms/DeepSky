@@ -3,6 +3,8 @@ const path = require('path');
 const readline = require('readline');
 
 const MAX_NEXT_STEP_WORDS = 6;
+const MAX_SUMMARY_CHARS = 320;
+const MAX_SUMMARY_SEGMENTS = 3;
 const TRAILING_FILLER_WORDS = new Set(['a', 'an', 'and', 'by', 'for', 'from', 'in', 'of', 'on', 'or', 'the', 'to', 'with']);
 
 class StatusService {
@@ -11,27 +13,73 @@ class StatusService {
     this.cache = new Map(); // sessionId → { data, mtimeMs }
   }
 
+  invalidate(sessionId) {
+    if (sessionId) this.cache.delete(sessionId);
+    else this.cache.clear();
+  }
+
   async getSessionStatus(sessionId) {
     const sessionDir = path.join(this.sessionStateDir, sessionId);
     try {
-      const stat = await fs.promises.stat(sessionDir);
+      const statusMtimeMs = await this._getStatusMtime(sessionDir);
       const cached = this.cache.get(sessionId);
-      if (cached && stat.mtimeMs <= cached.mtimeMs) return cached.data;
+      if (cached && statusMtimeMs <= cached.mtimeMs) return cached.data;
 
-      const [intent, summary, nextSteps, files, timeline] = await Promise.all([
+      const [intent, summary, nextSteps, files, timeline, notes] = await Promise.all([
         this._readIntent(sessionDir),
         this._readSummary(sessionDir),
         this._readPlan(sessionDir),
         this._readFiles(sessionDir),
         this._readTimeline(sessionDir),
+        this._readNotes(sessionDir),
       ]);
 
-      const data = { intent, summary, nextSteps, files, timeline };
-      this.cache.set(sessionId, { data, mtimeMs: Date.now() });
+      const data = { intent, summary, nextSteps, files, timeline, notes };
+      this.cache.set(sessionId, { data, mtimeMs: statusMtimeMs });
       return data;
     } catch {
-      return { intent: null, summary: null, nextSteps: [], files: [], timeline: [] };
+      return { intent: null, summary: null, nextSteps: [], files: [], timeline: [], notes: [] };
     }
+  }
+
+  async _getStatusMtime(sessionDir) {
+    const candidatePaths = [
+      sessionDir,
+      path.join(sessionDir, 'events.jsonl'),
+      path.join(sessionDir, 'session-summary.md'),
+      path.join(sessionDir, 'plan.md'),
+      path.join(sessionDir, 'workspace.yaml'),
+      path.join(sessionDir, '.deepsky-notes.json'),
+      path.join(sessionDir, 'checkpoints'),
+    ];
+
+    const stats = await Promise.all(candidatePaths.map(async (targetPath) => {
+      try {
+        return await fs.promises.stat(targetPath);
+      } catch {
+        return null;
+      }
+    }));
+
+    let latestMtimeMs = stats.reduce((max, stat) => stat ? Math.max(max, stat.mtimeMs) : max, 0);
+
+    try {
+      const checkpointDir = path.join(sessionDir, 'checkpoints');
+      const entries = await fs.promises.readdir(checkpointDir);
+      const markdownFiles = entries.filter(entry => entry.endsWith('.md'));
+      if (markdownFiles.length > 0) {
+        const checkpointStats = await Promise.all(markdownFiles.map(async (entry) => {
+          try {
+            return await fs.promises.stat(path.join(checkpointDir, entry));
+          } catch {
+            return null;
+          }
+        }));
+        latestMtimeMs = checkpointStats.reduce((max, stat) => stat ? Math.max(max, stat.mtimeMs) : max, latestMtimeMs);
+      }
+    } catch {}
+
+    return latestMtimeMs;
   }
 
   /**
@@ -84,11 +132,12 @@ class StatusService {
       const content = await fs.promises.readFile(path.join(sessionDir, 'session-summary.md'), 'utf8');
       const summaryMatch = content.match(/## Summary\s*\n([\s\S]*?)(?=\n## |$)/);
       if (summaryMatch) {
-        return { text: summaryMatch[1].trim(), source: 'session-summary' };
+        const text = this._normalizeSummary(summaryMatch[1]);
+        if (text) return { text, source: 'session-summary' };
       }
       // Fallback: use the whole file as summary (minus the title)
-      const body = content.replace(/^#[^\n]*\n/, '').trim();
-      if (body) return { text: body.substring(0, 500), source: 'session-summary' };
+      const body = this._normalizeSummary(content.replace(/^#[^\n]*\n/, ''));
+      if (body) return { text: body, source: 'session-summary' };
     } catch {}
 
     // 2. Latest checkpoint
@@ -100,7 +149,8 @@ class StatusService {
         const latest = await fs.promises.readFile(path.join(checkpointDir, mdFiles[mdFiles.length - 1]), 'utf8');
         const overviewMatch = latest.match(/<overview>\s*([\s\S]*?)\s*<\/overview>/);
         if (overviewMatch) {
-          return { text: overviewMatch[1].trim(), source: 'checkpoint' };
+          const text = this._normalizeSummary(overviewMatch[1]);
+          if (text) return { text, source: 'checkpoint' };
         }
       }
     } catch {}
@@ -110,11 +160,88 @@ class StatusService {
       const yaml = await fs.promises.readFile(path.join(sessionDir, 'workspace.yaml'), 'utf8');
       const match = yaml.match(/^summary:\s*(.+)$/m);
       if (match && match[1].trim()) {
-        return { text: match[1].trim(), source: 'workspace' };
+        const text = this._normalizeSummary(match[1]);
+        if (text) return { text, source: 'workspace' };
       }
     } catch {}
 
     return null;
+  }
+
+  _normalizeSummary(text) {
+    const raw = String(text || '').replace(/\r\n/g, '\n');
+    if (!raw.trim()) return '';
+
+    const chunks = [];
+    let paragraph = [];
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      chunks.push(paragraph.join(' ').trim());
+      paragraph = [];
+    };
+
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushParagraph();
+        continue;
+      }
+
+      const isListItem = /^([-*]|\d+\.)\s+/.test(trimmed);
+      const cleaned = trimmed
+        .replace(/^#+\s+/, '')
+        .replace(/^([-*]|\d+\.)\s+/, '')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!cleaned) continue;
+
+      if (isListItem) {
+        flushParagraph();
+        chunks.push(cleaned);
+        continue;
+      }
+
+      paragraph.push(cleaned);
+    }
+
+    flushParagraph();
+    if (!chunks.length) return '';
+
+    const joinChunks = (items) => items.reduce((acc, chunk) => {
+      if (!acc) return chunk;
+      return `${acc}${/[.!?]$/.test(acc) ? ' ' : '. '}${chunk}`;
+    }, '');
+
+    const fullText = joinChunks(chunks);
+    if (fullText.length <= MAX_SUMMARY_CHARS) {
+      return fullText;
+    }
+
+    const kept = [];
+    for (const chunk of chunks) {
+      if (kept.length >= MAX_SUMMARY_SEGMENTS) break;
+      const candidate = joinChunks([...kept, chunk]);
+      if (candidate.length > MAX_SUMMARY_CHARS) break;
+      kept.push(chunk);
+    }
+
+    const bounded = kept.length ? joinChunks(kept) : this._truncateAtWord(chunks[0], MAX_SUMMARY_CHARS);
+    if (bounded.length >= fullText.length) return bounded;
+
+    return `${this._truncateAtWord(bounded, MAX_SUMMARY_CHARS - 3).replace(/[,:;\-–—.\s]+$/u, '')}...`;
+  }
+
+  _truncateAtWord(text, maxLength) {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) return normalized;
+    const truncated = normalized.slice(0, Math.max(0, maxLength)).trimEnd();
+    const boundary = truncated.lastIndexOf(' ');
+    if (boundary >= Math.max(1, Math.floor(maxLength * 0.6))) {
+      return truncated.slice(0, boundary).trimEnd();
+    }
+    return truncated;
   }
 
   /**
@@ -190,6 +317,28 @@ class StatusService {
     return shortened.join(' ');
   }
 
+  async _readNotes(sessionDir) {
+    const notesPath = path.join(sessionDir, '.deepsky-notes.json');
+    const commentPath = path.join(sessionDir, '.deepsky-comment');
+    try {
+      const raw = await fs.promises.readFile(notesPath, 'utf8');
+      return JSON.parse(raw);
+    } catch {
+      // Migrate from legacy .deepsky-comment if it exists
+      try {
+        const comment = (await fs.promises.readFile(commentPath, 'utf8')).replace(/\r\n/g, '\n').trim();
+        if (comment) {
+          const now = new Date().toISOString();
+          const notes = [{ id: Date.now().toString(36), text: comment, createdAt: now, updatedAt: now }];
+          await fs.promises.writeFile(notesPath, JSON.stringify(notes, null, 2), 'utf8');
+          await fs.promises.rm(commentPath, { force: true });
+          return notes;
+        }
+      } catch {}
+      return [];
+    }
+  }
+
   /**
    * Extract file paths from edit/create tool events in events.jsonl.
    * Returns array of { path, action } (action: 'edit' | 'create').
@@ -198,7 +347,7 @@ class StatusService {
     const eventsPath = path.join(sessionDir, 'events.jsonl');
     try { await fs.promises.access(eventsPath); } catch { return []; }
 
-    const files = new Map(); // path → action
+    const files = new Map(); // shortPath → { fullPath, action }
 
     return new Promise((resolve) => {
       const stream = fs.createReadStream(eventsPath, { encoding: 'utf8' });
@@ -225,15 +374,16 @@ class StatusService {
           }
 
           if (filePath) {
-            // Normalize: take just filename or short relative path
-            const shortPath = filePath.replace(/\\/g, '/').split('/').slice(-2).join('/');
-            files.set(shortPath, toolName === 'create' ? 'A' : 'M');
+            const normalizedFull = filePath.replace(/\\/g, '/');
+            const shortPath = normalizedFull.split('/').slice(-2).join('/');
+            const action = toolName === 'create' ? 'A' : 'M';
+            files.set(shortPath, { fullPath: normalizedFull, action });
           }
         } catch { /* skip */ }
       });
 
       rl.on('close', () => {
-        resolve([...files].map(([p, action]) => ({ path: p, action })));
+        resolve([...files].map(([p, { fullPath, action }]) => ({ path: p, fullPath, action })));
       });
       rl.on('error', () => resolve([]));
     });

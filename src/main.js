@@ -94,6 +94,15 @@ const COPILOT_CONFIG_DIR = path.join(os.homedir(), '.copilot');
 const NOTIFICATIONS_DIR = path.join(COPILOT_CONFIG_DIR, 'notifications');
 const INSTRUCTIONS_PATH = path.join(COPILOT_CONFIG_DIR, 'copilot-instructions.md');
 
+function isSafeSessionId(sessionId) {
+  const normalized = String(sessionId || '').trim();
+  return !!normalized &&
+    !path.isAbsolute(normalized) &&
+    !normalized.includes('..') &&
+    !normalized.includes('/') &&
+    !normalized.includes('\\');
+}
+
 function resolveCopilotPath() {
   const { execSync } = require('child_process');
   // 1. Check PATH for copilot binary (copilot.exe and copilot.cmd on Windows)
@@ -348,6 +357,11 @@ app.whenReady().then(async () => {
     shell.openExternal(url);
   });
 
+  ipcMain.handle('shell:openPath', (event, filePath) => {
+    if (!filePath) return;
+    shell.openPath(filePath);
+  });
+
   // IPC: Notifications
   ipcMain.handle('notifications:getAll', () => notificationService.getAll());
   ipcMain.handle('notifications:getUnreadCount', () => notificationService.getUnreadCount());
@@ -417,6 +431,7 @@ app.whenReady().then(async () => {
   const sessionMatchesSidebarSearch = (session, query) => {
     if (session.title?.toLowerCase().includes(query)) return true;
     if (session.cwd?.toLowerCase().includes(query)) return true;
+    if (session.notes?.some(n => n.text?.toLowerCase().includes(query))) return true;
     if (session.tags?.some(tag => tag.toLowerCase().includes(query))) return true;
     if (session.resources?.some(resource =>
       String(resource.id || '').toLowerCase().includes(query) ||
@@ -464,6 +479,35 @@ app.whenReady().then(async () => {
     await sessionService.renameSession(sessionId, title);
   });
 
+  ipcMain.handle('session:getNotes', async (event, sessionId) => {
+    if (!isSafeSessionId(sessionId)) throw new Error('Invalid session ID');
+    return sessionService.getNotes(sessionId);
+  });
+
+  ipcMain.handle('session:addNote', async (event, sessionId, text) => {
+    if (!isSafeSessionId(sessionId)) throw new Error('Invalid session ID');
+    const note = await sessionService.addNote(sessionId, text);
+    statusService.invalidate(sessionId);
+    await hydrateSessionsCache();
+    return note;
+  });
+
+  ipcMain.handle('session:updateNote', async (event, sessionId, noteId, text) => {
+    if (!isSafeSessionId(sessionId)) throw new Error('Invalid session ID');
+    const note = await sessionService.updateNote(sessionId, noteId, text);
+    statusService.invalidate(sessionId);
+    await hydrateSessionsCache();
+    return note;
+  });
+
+  ipcMain.handle('session:deleteNote', async (event, sessionId, noteId) => {
+    if (!isSafeSessionId(sessionId)) throw new Error('Invalid session ID');
+    const notes = await sessionService.deleteNote(sessionId, noteId);
+    statusService.invalidate(sessionId);
+    await hydrateSessionsCache();
+    return notes;
+  });
+
   ipcMain.handle('session:delete', async (event, sessionId) => {
     ptyManager.kill(sessionId);
     await sessionService.deleteSession(sessionId);
@@ -471,6 +515,7 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('resource:add', async (event, sessionId, url) => {
     const resource = parseUrlToResource(url);
+    if (!resource) return null;
     return resourceIndexer.addManualResource(sessionId, resource);
   });
 
@@ -481,6 +526,57 @@ app.whenReady().then(async () => {
   // IPC: Get session status (intent, summary, plan, timeline, files)
   ipcMain.handle('session:getStatus', async (event, sessionId) => {
     return statusService.getSessionStatus(sessionId);
+  });
+
+  // IPC: Get git diff for a file
+  ipcMain.handle('file:getDiff', async (event, filePath) => {
+    const { execFile } = require('child_process');
+    const MAX_DIFF_LINES = 200;
+
+    const runGit = (args, cwd) => new Promise((resolve) => {
+      execFile('git', args, { cwd, timeout: 5000, maxBuffer: 512 * 1024 }, (err, stdout) => {
+        resolve(err ? null : stdout);
+      });
+    });
+
+    try {
+      // Reject paths containing '..' traversal attempts BEFORE normalization
+      if (filePath.includes('..')) {
+        return { diff: null, error: 'Invalid file path' };
+      }
+      
+      // Validate and normalize the file path to prevent path traversal
+      const normalized = path.resolve(filePath.replace(/\//g, '\\'));
+
+      const dir = path.dirname(normalized);
+
+      const gitRoot = await runGit(['rev-parse', '--show-toplevel'], dir);
+      if (!gitRoot) return { diff: null, error: 'Not a git repository' };
+
+      const root = path.resolve(gitRoot.trim().replace(/\//g, '\\'));
+      
+      // Security check: Ensure the file is within the git repository root
+      if (!normalized.startsWith(root + path.sep) && normalized !== root) {
+        return { diff: null, error: 'File is outside repository' };
+      }
+
+      const relPath = path.relative(root, normalized);
+
+      // Try staged + unstaged diff first, fall back to unstaged only
+      let diff = await runGit(['diff', 'HEAD', '--', relPath], root);
+      if (diff === null || diff === '') {
+        diff = await runGit(['diff', '--', relPath], root);
+      }
+
+      if (!diff || !diff.trim()) return { diff: null, error: null }; // no diff (clean or new untracked)
+
+      const lines = diff.split('\n');
+      const truncated = lines.length > MAX_DIFF_LINES;
+      const output = truncated ? lines.slice(0, MAX_DIFF_LINES).join('\n') + '\n...' : diff;
+      return { diff: output, truncated };
+    } catch {
+      return { diff: null, error: 'Failed to run git diff' };
+    }
   });
 
   // Forward pty output to renderer — batch at 16ms intervals to prevent IPC flooding

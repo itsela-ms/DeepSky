@@ -2,6 +2,7 @@ const EventEmitter = require('events');
 const crypto = require('crypto');
 
 const os = require('os');
+const REQUIRED_NODE_OPTIONS = ['--experimental-sqlite'];
 
 // Default to node-pty, but allow injection for testing
 let defaultPty;
@@ -32,6 +33,17 @@ class PtyManager extends EventEmitter {
     return { file: this.copilotPath, args: extraArgs };
   }
 
+  _buildSpawnEnv() {
+    const env = { ...process.env, TERM: 'xterm-256color' };
+    const existing = String(env.NODE_OPTIONS || '').trim();
+    const next = existing ? existing.split(/\s+/) : [];
+    for (const option of REQUIRED_NODE_OPTIONS) {
+      if (!next.includes(option)) next.push(option);
+    }
+    env.NODE_OPTIONS = next.join(' ').trim();
+    return env;
+  }
+
   get maxConcurrent() {
     return this.settingsService?.get().maxConcurrent || 5;
   }
@@ -59,7 +71,7 @@ class PtyManager extends EventEmitter {
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
+        env: this._buildSpawnEnv()
       });
     } catch (err) {
       // If spawn fails with given cwd, retry with homedir
@@ -71,7 +83,7 @@ class PtyManager extends EventEmitter {
             cols: 120,
             rows: 40,
             cwd: os.homedir(),
-            env: { ...process.env, TERM: 'xterm-256color' }
+            env: this._buildSpawnEnv()
           });
         } catch (err2) {
           throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err2.message}`);
@@ -134,7 +146,7 @@ class PtyManager extends EventEmitter {
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
+        env: this._buildSpawnEnv()
       });
     } catch (err) {
       if (cwd && cwd !== os.homedir()) {
@@ -145,7 +157,7 @@ class PtyManager extends EventEmitter {
             cols: 120,
             rows: 40,
             cwd: os.homedir(),
-            env: { ...process.env, TERM: 'xterm-256color' }
+            env: this._buildSpawnEnv()
           });
         } catch (err2) {
           throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err2.message}`);
@@ -230,7 +242,7 @@ class PtyManager extends EventEmitter {
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
+        env: this._buildSpawnEnv()
       });
 
       const entry = {

@@ -23,8 +23,8 @@ describe('SettingsService', () => {
       expect(settings.promptForWorkdir).toBe(false);
     });
 
-    it('maxConcurrent defaults to 5', () => {
-      expect(svc.get().maxConcurrent).toBe(5);
+    it('maxConcurrent defaults to 20', () => {
+      expect(svc.get().maxConcurrent).toBe(20);
     });
 
     it('theme defaults to mocha', () => {
@@ -57,7 +57,7 @@ describe('SettingsService', () => {
     it('returns defaults when config file does not exist', async () => {
       const settings = await svc.load();
       expect(settings.promptForWorkdir).toBe(false);
-      expect(settings.maxConcurrent).toBe(5);
+      expect(settings.maxConcurrent).toBe(20);
     });
 
     it('merges saved settings with defaults on load', async () => {

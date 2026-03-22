@@ -18,6 +18,20 @@ const PR_STATUS_RE = /"pullRequestId"\s*:\s*(\d+)[^}]*?"status"\s*:\s*"(active|c
 const PR_STATUS_ESCAPED_RE = /\\?"pullRequestId\\?"\s*:\s*(\d+)[\s\S]{0,200}?\\?"status\\?"\s*:\s*(\d+|\\?"(?:active|completed|abandoned)\\?")/gi;
 const WI_ID_TOOL_RE = /"workItemId"\s*:\s*(\d+)/g;
 
+// Strip trailing backticks, periods, newline escapes, and other junk from extracted URLs
+function sanitizeUrl(url) {
+  return (url || '').replace(/[`\n\r]+/g, '').replace(/[.)]+$/, '');
+}
+
+// Check if a URL looks like a template/placeholder
+function isTemplateUrl(url) {
+  if (/[`{}]/.test(url)) return true;
+  if (/\/(RepoName|RepositoryName|ProjectName|OrgName|YourRepo|example)\b/i.test(url)) return true;
+  if (/\/\.\.\.\//i.test(url)) return true;
+  if (/\.Example\./i.test(url)) return true;
+  return false;
+}
+
 function normalizeRepoUrl(url) {
   url = (url || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
   // Canonicalize host variants to a consistent form
@@ -118,19 +132,34 @@ class ResourceIndexer {
     const pipelines = new Map(); // buildId -> { id, url }
     const releases = new Map();  // releaseId -> { id, url }
 
+    // Event types that represent real actions (not agent reasoning/examples)
+    const ACTIONABLE_TYPES = new Set([
+      'user.message',
+      'tool.execution_start',
+      'tool.execution_complete',
+    ]);
+
     return new Promise((resolve) => {
       const stream = fs.createReadStream(eventsPath, { encoding: 'utf8' });
       const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
       rl.on('line', (line) => {
-        // Search the raw line for efficiency (most patterns work across any field)
+        // Only extract resources from actionable events (user messages, tool calls/results).
+        // Skip assistant messages — they may contain example URLs, schema descriptions,
+        // or hypothetical references that aren't real session resources.
+        try {
+          const typeMatch = line.match(/"type"\s*:\s*"([^"]+)"/);
+          if (!typeMatch || !ACTIONABLE_TYPES.has(typeMatch[1])) return;
+        } catch { return; }
+
         let m;
 
         // PR URLs (includes PR ID + repo context)
         const prUrlRe = new RegExp(PR_URL_RE.source, 'g');
         while ((m = prUrlRe.exec(line)) !== null) {
           const prId = m[1];
-          const url = m[0].replace(/[)}\]"\\]+$/, ''); // strip trailing junk
+          const url = sanitizeUrl(m[0].replace(/[)}\]"\\]+$/, ''));
+          if (isTemplateUrl(url)) continue;
           const repoMatch = url.match(/_git\/([^/]+)\/pullrequest/);
           const existing = prs.get(prId);
           if (existing) {
@@ -184,7 +213,8 @@ class ResourceIndexer {
         const wiUrlRe = new RegExp(WI_URL_RE.source, 'g');
         while ((m = wiUrlRe.exec(line)) !== null) {
           const wiId = m[1];
-          const url = m[0].replace(/[)}\]"\\]+$/, '');
+          const url = sanitizeUrl(m[0].replace(/[)}\]"\\]+$/, ''));
+          if (isTemplateUrl(url)) continue;
           workItems.set(wiId, { id: wiId, url, type: 'workitem' });
         }
 
@@ -200,8 +230,9 @@ class ResourceIndexer {
         // Git repo URLs (exclude PR URLs)
         const gitUrlRe = new RegExp(GIT_URL_RE.source, 'g');
         while ((m = gitUrlRe.exec(line)) !== null) {
-          let repoUrl = m[0].replace(/[)}\]"\\;,]+$/, '');
+          let repoUrl = sanitizeUrl(m[0].replace(/[)}\]"\\;,]+$/, ''));
           if (!repoUrl.includes('/pullrequest/')) {
+            if (isTemplateUrl(repoUrl)) continue;
             // Normalize: keep only up to /_git/RepoName
             const gitIdx = repoUrl.indexOf('/_git/');
             if (gitIdx !== -1) {
@@ -216,22 +247,25 @@ class ResourceIndexer {
         // Wiki URLs
         const wikiRe = new RegExp(WIKI_URL_RE.source, 'g');
         while ((m = wikiRe.exec(line)) !== null) {
-          wikiUrls.add(m[0].replace(/[)}\]"\\]+$/, ''));
+          const url = sanitizeUrl(m[0].replace(/[)}\]"\\]+$/, ''));
+          if (!isTemplateUrl(url)) wikiUrls.add(url);
         }
 
         // Pipeline URLs (build results)
         const pipelineRe = new RegExp(PIPELINE_URL_RE.source, 'g');
         while ((m = pipelineRe.exec(line)) !== null) {
           const buildId = m[1];
-          if (!pipelines.has(buildId)) {
-            pipelines.set(buildId, { id: buildId, url: m[0].replace(/[)}\]"\\]+$/, ''), type: 'pipeline' });
+          const url = sanitizeUrl(m[0].replace(/[)}\]"\\]+$/, ''));
+          if (!isTemplateUrl(url) && !pipelines.has(buildId)) {
+            pipelines.set(buildId, { id: buildId, url, type: 'pipeline' });
           }
         }
         const pipelineDefRe = new RegExp(PIPELINE_DEF_URL_RE.source, 'g');
         while ((m = pipelineDefRe.exec(line)) !== null) {
           const defId = `def-${m[1]}`;
-          if (!pipelines.has(defId)) {
-            pipelines.set(defId, { id: defId, url: m[0].replace(/[)}\]"\\]+$/, ''), type: 'pipeline' });
+          const url = sanitizeUrl(m[0].replace(/[)}\]"\\]+$/, ''));
+          if (!isTemplateUrl(url) && !pipelines.has(defId)) {
+            pipelines.set(defId, { id: defId, url, type: 'pipeline' });
           }
         }
 
@@ -239,8 +273,9 @@ class ResourceIndexer {
         const releaseRe = new RegExp(RELEASE_URL_RE.source, 'g');
         while ((m = releaseRe.exec(line)) !== null) {
           const releaseId = m[1];
-          if (!releases.has(releaseId)) {
-            releases.set(releaseId, { id: releaseId, url: m[0].replace(/[)}\]"\\]+$/, ''), type: 'release' });
+          const url = sanitizeUrl(m[0].replace(/[)}\]"\\]+$/, ''));
+          if (!isTemplateUrl(url) && !releases.has(releaseId)) {
+            releases.set(releaseId, { id: releaseId, url, type: 'release' });
           }
         }
       });
@@ -339,6 +374,13 @@ module.exports.resourceKey = resourceKey;
 
 module.exports.parseUrlToResource = function parseUrlToResource(url) {
   url = url.trim();
+
+  // Reject placeholder/template URLs
+  if (/[`{}]/.test(url)) return null;
+  if (/\/(RepoName|RepositoryName|ProjectName|OrgName|YourRepo|your-repo|example)\b/i.test(url)) return null;
+  if (/\/\.\.\.\//i.test(url)) return null;  // template URLs with .../
+  if (/\.Example\./i.test(url)) return null;  // example services like Sia.Example.Service
+
   let m;
   if ((m = url.match(/\/pullrequest\/(\d+)/))) {
     const repoMatch = url.match(/_git\/([^/]+)\/pullrequest/);

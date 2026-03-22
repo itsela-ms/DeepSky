@@ -2,6 +2,28 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.8.6] - 2026-03-19
+
+### Added
+- **Session notes** — multi-note system in the Status panel: add, edit, delete notes per session with timestamps. Auto-migrates from legacy single-comment format
+- **File diff popovers** — hover a changed file in the Status panel to see its git diff in a themed popover
+- **Open file in editor** — click a changed file in the Status panel to open it
+- **macOS DMG builds** — CI now builds a `.dmg` installer alongside the Windows `.exe`
+
+### Changed
+- **Double-click tab to rename** — double-click a session tab to rename it inline
+- **Shorter session names** — auto-generated names are now 1–3 words instead of long phrases
+- **Titlebar auto-hide** — titlebar hides when sidebar is fully collapsed; hover to reveal
+- **Min window width** — reduced to 400px for tighter layouts
+- **Smart tag selection** — improved auto-tag round-robin (PRs/WIs first, then repos → tools → topics)
+- **Status service** — mtime-based caching, checkpoint scanning, full file paths in changed files
+- **Resource filtering** — placeholder/template URLs (backticks, "RepoName", etc.) are now filtered out
+
+### Fixed
+- **Info bar** — fixed gap and flickering during session switches (absolute positioning)
+- **Links opening twice** — debounce per URL prevents duplicate opens
+- **Info bar height** — reduced, no longer overlaps terminal content
+
 ## [0.8.5] - 2026-03-16
 
 ### Added

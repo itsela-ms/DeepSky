@@ -8,6 +8,20 @@ class SessionService {
     this.dir = sessionStateDir;
   }
 
+  _resolveSessionDir(sessionId) {
+    const normalized = String(sessionId || '').trim();
+    if (
+      !normalized ||
+      path.isAbsolute(normalized) ||
+      normalized.includes('..') ||
+      normalized.includes('/') ||
+      normalized.includes('\\')
+    ) {
+      throw new Error('Invalid session ID');
+    }
+    return path.join(this.dir, normalized);
+  }
+
   async listSessions() {
     const entries = await fs.promises.readdir(this.dir, { withFileTypes: true });
     const dirs = entries.filter(e => e.isDirectory());
@@ -96,12 +110,14 @@ class SessionService {
         const customCwd = (await fs.promises.readFile(path.join(sessionDir, '.deepsky-cwd'), 'utf8')).trim();
         if (customCwd) cwd = customCwd;
       } catch {}
+      const notes = await this.getNotes(entry.name);
 
       const stat = await fs.promises.stat(sessionDir);
       return {
         id: entry.name,
         title,
         cwd,
+        notes,
         createdAt: meta.created_at || stat.birthtime.toISOString(),
         updatedAt: meta.updated_at || stat.mtime.toISOString(),
         lastModified: stat.mtime.getTime()
@@ -504,6 +520,62 @@ class SessionService {
   async renameSession(sessionId, title) {
     const customTitlePath = path.join(this.dir, sessionId, '.deepsky-title');
     await fs.promises.writeFile(customTitlePath, title.trim(), 'utf8');
+  }
+
+  async getNotes(sessionId) {
+    const sessionDir = this._resolveSessionDir(sessionId);
+    const notesPath = path.join(sessionDir, '.deepsky-notes.json');
+    const commentPath = path.join(sessionDir, '.deepsky-comment');
+
+    try {
+      const raw = await fs.promises.readFile(notesPath, 'utf8');
+      return JSON.parse(raw);
+    } catch {
+      // Migrate from legacy .deepsky-comment if it exists
+      const legacy = await this._readOptionalTrimmedFile(commentPath);
+      if (legacy) {
+        const now = new Date().toISOString();
+        const notes = [{ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: legacy, createdAt: now, updatedAt: now }];
+        await fs.promises.mkdir(sessionDir, { recursive: true });
+        await fs.promises.writeFile(notesPath, JSON.stringify(notes, null, 2), 'utf8');
+        await fs.promises.rm(commentPath, { force: true });
+        return notes;
+      }
+      return [];
+    }
+  }
+
+  async addNote(sessionId, text) {
+    const sessionDir = this._resolveSessionDir(sessionId);
+    const notesPath = path.join(sessionDir, '.deepsky-notes.json');
+    const notes = await this.getNotes(sessionId);
+    const now = new Date().toISOString();
+    const note = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: String(text || '').replace(/\r\n/g, '\n').trim(), createdAt: now, updatedAt: now };
+    notes.push(note);
+    await fs.promises.mkdir(sessionDir, { recursive: true });
+    await fs.promises.writeFile(notesPath, JSON.stringify(notes, null, 2), 'utf8');
+    return note;
+  }
+
+  async updateNote(sessionId, noteId, text) {
+    const sessionDir = this._resolveSessionDir(sessionId);
+    const notesPath = path.join(sessionDir, '.deepsky-notes.json');
+    const notes = await this.getNotes(sessionId);
+    const note = notes.find(n => n.id === noteId);
+    if (!note) throw new Error('Note not found');
+    note.text = String(text || '').replace(/\r\n/g, '\n').trim();
+    note.updatedAt = new Date().toISOString();
+    await fs.promises.writeFile(notesPath, JSON.stringify(notes, null, 2), 'utf8');
+    return note;
+  }
+
+  async deleteNote(sessionId, noteId) {
+    const sessionDir = this._resolveSessionDir(sessionId);
+    const notesPath = path.join(sessionDir, '.deepsky-notes.json');
+    let notes = await this.getNotes(sessionId);
+    notes = notes.filter(n => n.id !== noteId);
+    await fs.promises.writeFile(notesPath, JSON.stringify(notes, null, 2), 'utf8');
+    return notes;
   }
 
   async deleteSession(sessionId) {

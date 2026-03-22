@@ -26,6 +26,9 @@ async function createSession(id, yamlContent, extras = {}) {
   if (extras.deepskyTitle) {
     await fs.promises.writeFile(path.join(dir, '.deepsky-title'), extras.deepskyTitle, 'utf8');
   }
+  if (extras.deepskyComment) {
+    await fs.promises.writeFile(path.join(dir, '.deepsky-comment'), extras.deepskyComment, 'utf8');
+  }
   if (extras.events) {
     const lines = extras.events.map(event => JSON.stringify(event)).join('\n') + '\n';
     await fs.promises.writeFile(path.join(dir, 'events.jsonl'), lines, 'utf8');
@@ -134,6 +137,75 @@ describe('SessionService', () => {
       const sessions = await svc.listSessions();
       const sess = sessions.find(s => s.id === 'roundtrip-list');
       expect(sess.cwd).toBe('/updated');
+    });
+  });
+
+  describe('session notes', () => {
+    it('getNotes returns empty array for new session', async () => {
+      await createSession('notes-empty', 'summary: test');
+      const notes = await svc.getNotes('notes-empty');
+      expect(notes).toEqual([]);
+    });
+
+    it('addNote and getNotes roundtrip', async () => {
+      await createSession('notes-add', 'summary: test');
+      const note = await svc.addNote('notes-add', '  Follow up with PM.  ');
+      expect(note.text).toBe('Follow up with PM.');
+      expect(note.id).toBeTruthy();
+      expect(note.createdAt).toBeTruthy();
+      expect(note.updatedAt).toBeTruthy();
+
+      const notes = await svc.getNotes('notes-add');
+      expect(notes).toHaveLength(1);
+      expect(notes[0].text).toBe('Follow up with PM.');
+    });
+
+    it('updateNote changes text and updatedAt', async () => {
+      await createSession('notes-update', 'summary: test');
+      const note = await svc.addNote('notes-update', 'Original');
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const updated = await svc.updateNote('notes-update', note.id, 'Revised');
+
+      expect(updated.text).toBe('Revised');
+      expect(updated.id).toBe(note.id);
+      expect(new Date(updated.updatedAt).getTime()).toBeGreaterThan(new Date(note.updatedAt).getTime());
+    });
+
+    it('deleteNote removes the note', async () => {
+      await createSession('notes-delete', 'summary: test');
+      const n1 = await svc.addNote('notes-delete', 'First');
+      await svc.addNote('notes-delete', 'Second');
+      const remaining = await svc.deleteNote('notes-delete', n1.id);
+
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].text).toBe('Second');
+    });
+
+    it('migrates legacy .deepsky-comment to notes on first read', async () => {
+      await createSession('notes-migrate', 'summary: test', { deepskyComment: 'Needs design review' });
+      const notes = await svc.getNotes('notes-migrate');
+
+      expect(notes).toHaveLength(1);
+      expect(notes[0].text).toBe('Needs design review');
+      expect(notes[0].id).toBeTruthy();
+
+      // Legacy file should be removed after migration
+      const legacyExists = await fs.promises.access(path.join(tmpDir, 'notes-migrate', '.deepsky-comment')).then(() => true).catch(() => false);
+      expect(legacyExists).toBe(false);
+    });
+
+    it('includes stored notes in session listings', async () => {
+      await createSession('notes-list', 'summary: test session');
+      await svc.addNote('notes-list', 'Needs design review');
+      const sessions = await svc.listSessions();
+      const sess = sessions.find(s => s.id === 'notes-list');
+
+      expect(sess.notes).toHaveLength(1);
+      expect(sess.notes[0].text).toBe('Needs design review');
+    });
+
+    it('rejects invalid session ids when adding notes', async () => {
+      await expect(svc.addNote('..\\outside', 'nope')).rejects.toThrow('Invalid session ID');
     });
   });
 

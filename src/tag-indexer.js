@@ -7,6 +7,21 @@ const REBUILD_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 // Patterns for extracting tags from session content
 const REPO_PATTERN = /(?:^|\s|\/)((?:Cloud|Detection|Mgmt|InR|InE|Nexus|WDATP|WD|MD|MDE|TVM|NDR|Response|Sense|OneCyber|MDATP|AutomatedIR|CaseManagement|Geneva|XSPM|FE|Subscriptions|AAPT)[\w.]*)/g;
+
+// Validate a repo-like match: reject method paths, file names, and truncated names
+function isValidRepoTag(name) {
+  if (!name || name.length < 4) return false;
+  if (name.endsWith('.')) return false;
+  // Too many dots = namespace/method path (repos have max 3 dots)
+  if ((name.match(/\./g) || []).length > 3) return false;
+  // File extensions
+  if (/\.(cs|js|ts|json|xml|yml|yaml|md|txt|ps1|config)$/i.test(name)) return false;
+  // Method/class patterns - guard against empty array from split
+  const parts = name.split('.');
+  if (parts.length === 0) return false;
+  if (/Client|Async|Manager|Sender|Contract|Topology|Handler|Factory|Builder|Result|Provider/i.test(parts[parts.length - 1])) return false;
+  return true;
+}
 const TOOL_TAGS = {
   'kusto-mcp': 'kusto',
   'ado-mcp': 'azure-devops',
@@ -152,7 +167,7 @@ class TagIndexer {
             let match;
             const repoRegex = new RegExp(REPO_PATTERN.source, 'g');
             while ((match = repoRegex.exec(content)) !== null) {
-              tags.add(`repo:${match[1]}`);
+              if (isValidRepoTag(match[1])) tags.add(`repo:${match[1]}`);
             }
 
             // Topic keywords
@@ -178,7 +193,7 @@ class TagIndexer {
             const content = event.data.content;
             const repoRegex2 = new RegExp(REPO_PATTERN.source, 'g');
             while ((match = repoRegex2.exec(content)) !== null) {
-              tags.add(`repo:${match[1]}`);
+              if (isValidRepoTag(match[1])) tags.add(`repo:${match[1]}`);
             }
           }
         } catch {}

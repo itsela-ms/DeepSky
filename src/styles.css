@@ -618,25 +618,7 @@ body {
   font-family: 'Cascadia Code', 'Consolas', monospace;
 }
 
-.tag-overflow {
-  cursor: default;
-  color: var(--text-dimmer);
-  background: transparent;
-  padding: 1px 4px;
-}
 
-.tags-hidden {
-  display: none;
-  gap: 3px;
-}
-
-.session-item:hover .tags-hidden {
-  display: contents;
-}
-
-.session-item:hover .tag-overflow {
-  display: none;
-}
 
 /* Empty list state */
 .empty-list {
@@ -2385,6 +2367,69 @@ body {
 }
 .status-step-text { color: var(--text); }
 
+/* Notes section */
+.status-notes-list { display: flex; flex-direction: column; gap: 6px; }
+.status-notes-empty { font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px 0; }
+
+.status-note {
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.status-note-text {
+  font-size: 12px; color: var(--text); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+.status-note-meta {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; font-size: 10px; color: var(--text-dim);
+}
+.status-note-time { flex: 1; }
+.status-note-edit, .status-note-delete {
+  background: none; border: none; color: var(--text-dim);
+  cursor: pointer; font-size: 12px; padding: 0 2px;
+  opacity: 0; transition: opacity 0.15s, color 0.15s;
+}
+.status-note:hover .status-note-edit,
+.status-note:hover .status-note-delete { opacity: 1; }
+.status-note-edit:hover { color: var(--accent); }
+.status-note-delete:hover { color: var(--red); }
+
+.status-note-add {
+  width: 100%; padding: 6px; margin-top: 4px;
+  background: none; border: 1px dashed var(--border);
+  border-radius: 6px; color: var(--text-dim);
+  font-size: 11px; cursor: pointer; transition: all 0.15s;
+}
+.status-note-add:hover { border-color: var(--accent); color: var(--accent); }
+
+.status-note-editor { margin-bottom: 6px; }
+.status-note-input {
+  width: 100%; min-height: 50px; max-height: 120px; resize: vertical;
+  background: var(--bg-overlay); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 8px 10px;
+  font-family: 'Segoe UI', sans-serif; font-size: 12px;
+  line-height: 1.5; color: var(--text); outline: none;
+}
+.status-note-input::-webkit-scrollbar { width: 4px; }
+.status-note-input::-webkit-scrollbar-track { background: transparent; }
+.status-note-input::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.status-note-editor-actions {
+  display: flex; gap: 6px; margin-top: 4px; justify-content: flex-end;
+}
+.status-note-editor-actions button {
+  font-size: 11px; padding: 3px 10px; border-radius: 4px;
+  cursor: pointer; border: 1px solid var(--border);
+  background: var(--bg-overlay); color: var(--text-dim); transition: all 0.15s;
+}
+.status-note-editor-actions button:first-child {
+  background: var(--accent); color: var(--bg); border-color: var(--accent);
+}
+.status-note-editor-actions button:first-child:hover { opacity: 0.9; }
+.status-note-editor-actions button:last-child:hover { color: var(--text); }
+
 /* Resource items (PRs, WIs, pipelines, repos) */
 .status-resource-item {
   display: flex;
@@ -2450,6 +2495,16 @@ body {
   font-size: 11px;
   font-family: 'Cascadia Code', 'Consolas', monospace;
   color: var(--text);
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 4px 4px;
+  margin: 0 -4px;
+}
+.status-file-item:hover {
+  background: var(--surface1);
+}
+.status-file-item:active {
+  opacity: 0.7;
 }
 .status-file-badge {
   font-size: 10px;
@@ -2466,6 +2521,45 @@ body {
   text-overflow: ellipsis;
   direction: rtl;
   text-align: left;
+}
+.status-file-link {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+.status-file-link:hover {
+  text-decoration: underline;
+}
+
+/* Diff popover (hover on changed files) */
+.diff-popover {
+  position: fixed;
+  z-index: 10001;
+  max-width: 520px;
+  max-height: 340px;
+  overflow: auto;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 0;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  pointer-events: auto;
+}
+.diff-line {
+  padding: 0 10px;
+  white-space: pre;
+}
+.diff-line-add { color: var(--green); }
+.diff-line-del { color: var(--red); }
+.diff-line-hunk { color: var(--accent); opacity: 0.7; }
+.diff-line-ctx { color: var(--text-dim); }
+.diff-popover-empty {
+  padding: 8px 10px;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 /* Timeline */

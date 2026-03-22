@@ -146,6 +146,17 @@ function updateSessionSearchUi() {
   sessionSearchNext.disabled = !hasMatches;
 }
 
+function formatRelativeTime(isoString) {
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
 function clearActiveTerminalSelection() {
   const entry = getActiveTerminalEntry();
   if (entry) entry.terminal.clearSelection();
@@ -588,7 +599,7 @@ async function init() {
       entry.terminal.write(`\r\n\x1b[90m[Session ended with code ${exitCode}]\x1b[0m\r\n`, () => {
         scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
       });
-      // Dispose terminal after a short delay so the exit message is visible
+      // Auto-close the tab after a brief delay so the exit message is visible
       entry.exitTimeout = setTimeout(() => {
         const e = terminals.get(sessionId);
         if (e && e.exited) {
@@ -607,9 +618,9 @@ async function init() {
             else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
           }
           saveTabState();
-          scheduleRenderSessionList();
+          renderSessionList();
         }
-      }, 3000);
+      }, 1500);
     }
     sessionAliveState.delete(sessionId);
     sessionBusyState.delete(sessionId);
@@ -617,6 +628,7 @@ async function init() {
     cwdChangingSessions.delete(sessionId);
     updateTabStatus(sessionId, false);
     patchSessionStateBadges();
+    renderSessionList();
   }));
 
   const evictedUnsub = window.api.onPtyEvicted?.((sessionId) => {
@@ -698,16 +710,94 @@ async function init() {
   });
   statusPanelBody.addEventListener('click', async (event) => {
     const copyButton = event.target.closest('.status-copy-session-id');
-    if (!copyButton) return;
+    if (copyButton) {
+      const sessionId = copyButton.dataset.sessionId;
+      if (!sessionId) return;
 
-    const sessionId = copyButton.dataset.sessionId;
-    if (!sessionId) return;
+      try {
+        await window.api.copyText(sessionId);
+        showToast({ type: 'success', title: 'Session ID copied', body: sessionId });
+      } catch {
+        showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
+      }
+      return;
+    }
 
-    try {
-      await window.api.copyText(sessionId);
-      showToast({ type: 'success', title: 'Session ID copied', body: sessionId });
-    } catch {
-      showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
+    // Notes: Add note
+    const addBtn = event.target.closest('.status-note-add');
+    if (addBtn) {
+      const sessionId = addBtn.dataset.sessionId;
+      const input = document.createElement('div');
+      input.className = 'status-note-editor';
+      input.innerHTML = `<textarea class="status-note-input" placeholder="Write a note..." maxlength="500" autofocus></textarea>
+        <div class="status-note-editor-actions">
+          <button class="status-note-save-new" data-session-id="${sessionId}">Save</button>
+          <button class="status-note-cancel" data-session-id="${sessionId}">Cancel</button>
+        </div>`;
+      addBtn.before(input);
+      addBtn.style.display = 'none';
+      input.querySelector('textarea').focus();
+      return;
+    }
+
+    // Notes: Save new note
+    const saveNew = event.target.closest('.status-note-save-new');
+    if (saveNew) {
+      const sessionId = saveNew.dataset.sessionId;
+      const textarea = saveNew.closest('.status-note-editor').querySelector('textarea');
+      const text = textarea.value.trim();
+      if (text) {
+        await window.api.addSessionNote(sessionId, text);
+        statusSectionState['notes'] = true;
+        await updateStatusPanel(sessionId);
+      }
+      return;
+    }
+
+    // Notes: Edit note
+    const editBtn = event.target.closest('.status-note-edit');
+    if (editBtn) {
+      const noteEl = editBtn.closest('.status-note');
+      const noteId = editBtn.dataset.noteId;
+      const sessionId = editBtn.dataset.sessionId;
+      const currentText = noteEl.querySelector('.status-note-text').textContent;
+      noteEl.innerHTML = `<textarea class="status-note-input">${escapeHtml(currentText)}</textarea>
+        <div class="status-note-editor-actions">
+          <button class="status-note-save-edit" data-session-id="${sessionId}" data-note-id="${noteId}">Save</button>
+          <button class="status-note-cancel-edit" data-session-id="${sessionId}">Cancel</button>
+        </div>`;
+      noteEl.querySelector('textarea').focus();
+      return;
+    }
+
+    // Notes: Save edit
+    const saveEdit = event.target.closest('.status-note-save-edit');
+    if (saveEdit) {
+      const textarea = saveEdit.closest('.status-note').querySelector('textarea');
+      await window.api.updateSessionNote(saveEdit.dataset.sessionId, saveEdit.dataset.noteId, textarea.value.trim());
+      statusSectionState['notes'] = true;
+      await updateStatusPanel(saveEdit.dataset.sessionId);
+      return;
+    }
+
+    // Notes: Delete note
+    const deleteBtn = event.target.closest('.status-note-delete');
+    if (deleteBtn) {
+      await window.api.deleteSessionNote(deleteBtn.dataset.sessionId, deleteBtn.dataset.noteId);
+      statusSectionState['notes'] = true;
+      await updateStatusPanel(deleteBtn.dataset.sessionId);
+      return;
+    }
+
+    // Notes: Cancel (both new and edit)
+    const cancelBtn = event.target.closest('.status-note-cancel, .status-note-cancel-edit');
+    if (cancelBtn) {
+      const sessionId = cancelBtn.dataset?.sessionId || cancelBtn.closest('[data-session-id]')?.dataset?.sessionId;
+      if (sessionId) {
+        statusSectionState['notes'] = true;
+        await updateStatusPanel(sessionId);
+      }
+      return;
     }
   });
 
@@ -1014,30 +1104,47 @@ function createSessionItem(session, group, index) {
     : lastUsedDate.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + lastUsedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
   let tagsHtml = '';
-  const allPills = [];
-  if (session.resources && session.resources.length > 0) {
-    const prs = session.resources.filter(r => r.type === 'pr');
-    const wis = session.resources.filter(r => r.type === 'workitem');
-    if (prs.length > 0) allPills.push(`<span class="tag tag-pr" title="${escapeHtml(prs.map(p => 'PR ' + p.id + (p.repo ? ' (' + p.repo + ')' : '') + (p.state ? ' [' + p.state + ']' : '')).join('\n'))}">PR ${prs.map(p => p.id).join(', ')}</span>`);
-    if (wis.length > 0) allPills.push(`<span class="tag tag-wi" title="${escapeHtml(wis.map(w => 'WI ' + w.id).join('\n'))}">WI ${wis.map(w => w.id).join(', ')}</span>`);
-  }
-  if (session.tags && session.tags.length > 0) {
-    const repos = session.tags.filter(t => t.startsWith('repo:'));
-    const rest = session.tags.filter(t => !t.startsWith('repo:'));
-    for (const t of [...repos, ...rest]) {
-      const cls = t.startsWith('repo:') ? 'tag tag-repo' : 'tag';
-      const label = t.replace(/^(repo|tool):/, '');
-      allPills.push(`<span class="${cls}">${escapeHtml(label)}</span>`);
+  {
+    const MAX_TAGS = 10;
+    const prPills = [];
+    const wiPills = [];
+    if (session.resources && session.resources.length > 0) {
+      const prs = session.resources.filter(r => r.type === 'pr');
+      const wis = session.resources.filter(r => r.type === 'workitem');
+      if (prs.length > 0) prPills.push({ label: `PR ${prs.map(p => p.id).join(', ')}`, cls: 'tag tag-pr', title: prs.map(p => 'PR ' + p.id + (p.repo ? ' (' + p.repo + ')' : '') + (p.state ? ' [' + p.state + ']' : '')).join('\n') });
+      if (wis.length > 0) wiPills.push({ label: `WI ${wis.map(w => w.id).join(', ')}`, cls: 'tag tag-wi', title: wis.map(w => 'WI ' + w.id).join('\n') });
     }
-  }
-  if (allPills.length > 0) {
-    const MAX_VISIBLE = 3;
-    const visible = allPills.slice(0, MAX_VISIBLE).join('');
-    const hiddenCount = allPills.length - MAX_VISIBLE;
-    const hidden = hiddenCount > 0
-      ? `<span class="tag tag-overflow">+${hiddenCount}</span><span class="tags-hidden">${allPills.slice(MAX_VISIBLE).join('')}</span>`
-      : '';
-    tagsHtml = `<div class="session-tags">${visible}${hidden}</div>`;
+    const repoPills = [];
+    const toolPills = [];
+    const topicPills = [];
+    if (session.tags && session.tags.length > 0) {
+      for (const t of session.tags) {
+        if (t.startsWith('repo:')) {
+          repoPills.push({ label: t.slice(5), cls: 'tag tag-repo', specificity: t.split('.').length });
+        } else if (t.startsWith('tool:')) {
+          toolPills.push({ label: t.slice(5), cls: 'tag' });
+        } else {
+          topicPills.push({ label: t, cls: 'tag' });
+        }
+      }
+      repoPills.sort((a, b) => b.specificity - a.specificity);
+    }
+    // Select tags: PRs/WIs always, then round-robin repos → tools → topics
+    const selected = [...prPills, ...wiPills];
+    const pools = [repoPills, toolPills, topicPills];
+    const idx = [0, 0, 0];
+    while (selected.length < MAX_TAGS) {
+      let added = false;
+      for (let i = 0; i < pools.length; i++) {
+        if (selected.length >= MAX_TAGS) break;
+        if (idx[i] < pools[i].length) { selected.push(pools[i][idx[i]++]); added = true; }
+      }
+      if (!added) break;
+    }
+    if (selected.length > 0) {
+      const pills = selected.map(t => `<span class="${t.cls}"${t.title ? ` title="${escapeHtml(t.title)}"` : ''}>${escapeHtml(t.label)}</span>`).join('');
+      tagsHtml = `<div class="session-tags">${pills}</div>`;
+    }
   }
 
   const isRunning = sessionAliveState.has(session.id);
@@ -1116,7 +1223,11 @@ function createSessionItem(session, group, index) {
 }
 
 function renderSessionList() {
-  const activeIds = new Set([...terminals.keys()]);
+  const activeIds = new Set(
+    [...terminals.entries()]
+      .filter(([, entry]) => !entry.exited)
+      .map(([id]) => id)
+  );
 
   let displayed;
   if (currentSidebarTab === 'active') {
@@ -1358,6 +1469,8 @@ function confirmDeleteSession(sessionId, title) {
 
   overlay.querySelector('.confirm-delete').addEventListener('click', async () => {
     cleanup();
+    sessionCommentDrafts.delete(sessionId);
+    sessionCommentSaving.delete(sessionId);
     // Close tab if open
     if (terminals.has(sessionId)) {
       await closeTab(sessionId);
@@ -1700,6 +1813,8 @@ async function closeTab(sessionId) {
 
   // Remember for Ctrl+Shift+T restore
   recentlyClosedSessions.push(sessionId);
+  sessionCommentDrafts.delete(sessionId);
+  sessionCommentSaving.delete(sessionId);
 
   const entry = terminals.get(sessionId);
   if (entry) {
@@ -2222,7 +2337,7 @@ async function updateStatusPanel(sessionId) {
   ]);
 
   const resources = session?.resources || [];
-  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], timeline: [] };
+  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], timeline: [], notes: [] };
 
   let html = '';
 
@@ -2246,6 +2361,28 @@ async function updateStatusPanel(sessionId) {
       <button class="status-copy-session-id" type="button" data-session-id="${escapeHtml(sessionId)}" title="Copy session ID">Copy</button>
     </div>`;
   html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
+
+  // Notes section
+  const notes = status.notes || [];
+  let notesHtml = `<div class="status-notes-list">`;
+  if (notes.length === 0) {
+    notesHtml += `<div class="status-notes-empty">No notes yet.</div>`;
+  }
+  for (const note of notes) {
+    const age = formatRelativeTime(note.updatedAt || note.createdAt);
+    notesHtml += `
+      <div class="status-note" data-note-id="${escapeAttribute(note.id)}">
+        <div class="status-note-text">${escapeHtml(note.text)}</div>
+        <div class="status-note-meta">
+          <span class="status-note-time">${age}</span>
+          <button class="status-note-edit" data-note-id="${escapeAttribute(note.id)}" data-session-id="${escapeAttribute(sessionId)}" title="Edit">✎</button>
+          <button class="status-note-delete" data-note-id="${escapeAttribute(note.id)}" data-session-id="${escapeAttribute(sessionId)}" title="Delete">×</button>
+        </div>
+      </div>`;
+  }
+  notesHtml += `</div>`;
+  notesHtml += `<button class="status-note-add" data-session-id="${escapeAttribute(sessionId)}">+ Add note</button>`;
+  html += renderStatusSection('notes', '🗒️', 'Notes', notes.length || null, notesHtml);
 
   // Next steps
   if (status.nextSteps.length > 0) {
@@ -2281,9 +2418,10 @@ async function updateStatusPanel(sessionId) {
   if (status.files.length > 0) {
     const filesHtml = status.files.map(f => {
       const badgeCls = f.action === 'A' ? 'status-file-added' : 'status-file-modified';
-      return `<div class="status-file-item">
+      const fullAttr = f.fullPath ? ` data-fullpath="${escapeAttribute(f.fullPath)}"` : '';
+      return `<div class="status-file-item"${fullAttr}>
         <span class="status-file-badge ${badgeCls}">${f.action}</span>
-        <span class="status-file-path">${escapeHtml(f.path)}</span>
+        <a class="status-file-path status-file-link">${escapeHtml(f.path)}</a>
       </div>`;
     }).join('');
     html += renderStatusSection('files', '📂', 'Files Changed', status.files.length, filesHtml);
@@ -2336,6 +2474,126 @@ async function updateStatusPanel(sessionId) {
       if (url && url !== '#') window.api.openExternal(url);
     });
   });
+
+  // Wire file diff popovers on hover
+  wireFileDiffPopovers();
+
+  syncStatusCommentEditorState();
+}
+
+// ── Diff popover for changed files ──────────────────────────────────
+const diffCache = new Map(); // fullPath → { diff, error }
+let activeDiffPopover = null;
+let diffPopoverHideTimer = null;
+
+function wireFileDiffPopovers() {
+  // Don't clear diffCache here — an async fetch may be in-flight and would
+  // write back into the cache after the clear, leaving a stale entry that
+  // causes a null-deref in showDiffPopover.  Entries are keyed by fullPath
+  // so they naturally stay fresh across re-renders.
+  statusPanelBody.querySelectorAll('.status-file-item[data-fullpath]').forEach(item => {
+    item.addEventListener('mouseenter', onFileItemMouseEnter);
+    item.addEventListener('mouseleave', onFileItemMouseLeave);
+    item.addEventListener('click', onFileItemClick);
+  });
+}
+
+function onFileItemClick(e) {
+  const fullPath = e.currentTarget.dataset.fullpath;
+  if (fullPath) window.api.openPath(fullPath);
+}
+
+async function onFileItemMouseEnter(e) {
+  const item = e.currentTarget;
+  const fullPath = item.dataset.fullpath;
+  if (!fullPath) return;
+
+  clearTimeout(diffPopoverHideTimer);
+
+  // Fetch diff (cached)
+  if (!diffCache.has(fullPath)) {
+    diffCache.set(fullPath, null); // mark as loading
+    try {
+      const result = await window.api.getFileDiff(fullPath);
+      diffCache.set(fullPath, result);
+    } catch {
+      diffCache.set(fullPath, { diff: null, error: 'Failed to fetch diff' });
+    }
+  }
+
+  const cached = diffCache.get(fullPath);
+  // Guard against null (still loading from another hover or race condition)
+  if (!cached || cached === null) return;
+
+  showDiffPopover(item, cached);
+}
+
+function onFileItemMouseLeave() {
+  diffPopoverHideTimer = setTimeout(hideDiffPopover, 200);
+}
+
+function showDiffPopover(anchor, result) {
+  hideDiffPopover();
+
+  // Guard against null/loading state (race condition protection)
+  if (!result || result === null) return;
+  if (!result.diff || result.error) return; // no git repo or no diff
+
+  const html = renderDiffLines(result.diff, result.truncated);
+  if (!html.trim()) return; // diff was only headers — nothing useful
+
+  const popover = document.createElement('div');
+  popover.className = 'diff-popover';
+  popover.innerHTML = html;
+
+  // Keep popover alive when mouse enters it
+  popover.addEventListener('mouseenter', () => clearTimeout(diffPopoverHideTimer));
+  popover.addEventListener('mouseleave', () => {
+    diffPopoverHideTimer = setTimeout(hideDiffPopover, 200);
+  });
+
+  document.body.appendChild(popover);
+  activeDiffPopover = popover;
+
+  // Position to the left of the anchor
+  const rect = anchor.getBoundingClientRect();
+  const popW = popover.offsetWidth;
+  const popH = popover.offsetHeight;
+  let left = rect.left - popW - 8;
+  let top = rect.top;
+
+  // If no room on the left, try right
+  if (left < 4) left = rect.right + 8;
+  // Clamp vertical position
+  if (top + popH > window.innerHeight - 8) top = window.innerHeight - popH - 8;
+  if (top < 4) top = 4;
+
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+}
+
+function hideDiffPopover() {
+  if (activeDiffPopover) {
+    activeDiffPopover.remove();
+    activeDiffPopover = null;
+  }
+}
+
+function renderDiffLines(diff, truncated) {
+  const lines = diff.split('\n');
+  let html = '';
+  for (const line of lines) {
+    let cls = 'diff-line-ctx';
+    if (line.startsWith('+')) cls = 'diff-line-add';
+    else if (line.startsWith('-')) cls = 'diff-line-del';
+    else if (line.startsWith('@@')) cls = 'diff-line-hunk';
+    else if (line.startsWith('diff ') || line.startsWith('index ')) continue; // skip headers
+    html += `<div class="diff-line ${cls}">${escapeHtml(line)}</div>`;
+  }
+  if (truncated) {
+    html += '<div class="diff-popover-empty">... diff truncated (200+ lines)</div>';
+  }
+  return html;
 }
 
 function fitActiveTerminal() {
@@ -2654,6 +2912,10 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function escapeAttribute(str) {
+  return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function shortenPath(p) {
   if (!p) return '';
   const sep = p.includes('/') ? '/' : '\\';
@@ -2783,7 +3045,7 @@ btnNewCenter.addEventListener('click', newSession);
 
 maxConcurrentInput.addEventListener('change', (e) => {
   const val = parseInt(e.target.value, 10);
-  if (val >= 1 && val <= 20) window.api.updateSettings({ maxConcurrent: val });
+  if (val >= 1 && val <= 50) window.api.updateSettings({ maxConcurrent: val });
 });
 
 promptWorkdirInput.addEventListener('change', (e) => {

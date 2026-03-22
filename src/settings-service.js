@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULTS = {
-  maxConcurrent: 5,
+  maxConcurrent: 20,
   sidebarWidth: 280,
   sidebarCollapsed: false,
   lastActiveTab: 'active', // 'active' or 'history'

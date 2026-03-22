@@ -74,6 +74,7 @@ describe('createTerminalKeyHandler', () => {
       hasSelection: vi.fn().mockReturnValue(false),
       getSelection: vi.fn().mockReturnValue('selected text'),
       clearSelection: vi.fn(),
+      selectAll: vi.fn(),
       select: vi.fn(),
       cols: 120,
       buffer: { active: new MockBuffer(['alpha beta gamma'], 0) }

@@ -223,6 +223,50 @@ describe('PtyManager', () => {
       expect(entry.cwd).toBe('/stored/path');
     });
 
+    it('adds experimental sqlite to NODE_OPTIONS for spawned sessions', () => {
+      const previousNodeOptions = process.env.NODE_OPTIONS;
+      delete process.env.NODE_OPTIONS;
+      mockPtyModule.spawn.mockClear();
+
+      manager.newSession('/my/project');
+
+      const callArgs = mockPtyModule.spawn.mock.calls[0];
+      expect(callArgs[2].env.NODE_OPTIONS).toContain('--experimental-sqlite');
+
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    });
+
+    it('preserves existing NODE_OPTIONS when adding experimental sqlite', () => {
+      const previousNodeOptions = process.env.NODE_OPTIONS;
+      process.env.NODE_OPTIONS = '--trace-warnings';
+      mockPtyModule.spawn.mockClear();
+
+      manager.newSession('/my/project');
+
+      const callArgs = mockPtyModule.spawn.mock.calls[0];
+      expect(callArgs[2].env.NODE_OPTIONS).toContain('--trace-warnings');
+      expect(callArgs[2].env.NODE_OPTIONS).toContain('--experimental-sqlite');
+
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    });
+
+    it('does not duplicate experimental sqlite in NODE_OPTIONS', () => {
+      const previousNodeOptions = process.env.NODE_OPTIONS;
+      process.env.NODE_OPTIONS = '--experimental-sqlite --trace-warnings';
+      mockPtyModule.spawn.mockClear();
+
+      manager.newSession('/my/project');
+
+      const callArgs = mockPtyModule.spawn.mock.calls[0];
+      const sqliteFlags = callArgs[2].env.NODE_OPTIONS.split(/\s+/).filter((arg) => arg === '--experimental-sqlite');
+      expect(sqliteFlags).toHaveLength(1);
+
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    });
+
     it('old pty exit does not affect new entry after kill+reopen', () => {
       // Simulate cwd change: kill old pty, open new one for same sessionId
       const id = manager.openSession('reopen-1', '/old/path');
