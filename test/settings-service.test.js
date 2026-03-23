@@ -30,6 +30,14 @@ describe('SettingsService', () => {
     it('theme defaults to mocha', () => {
       expect(svc.get().theme).toBe('mocha');
     });
+
+    it('autoUpdateEnabled defaults to true', () => {
+      expect(svc.get().autoUpdateEnabled).toBe(true);
+    });
+
+    it('updateChannel defaults to stable', () => {
+      expect(svc.get().updateChannel).toBe('stable');
+    });
   });
 
   describe('update + persistence', () => {

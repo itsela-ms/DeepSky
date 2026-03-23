@@ -32,3 +32,18 @@ Owner: Itay Sela. Repo: itsela-ms/DeepSky.
 **Final Results:** 346 tests passing (+30), all green ✅
 
 **Key Learning:** Helper/utility functions often lack direct test coverage even when their calling code is tested. When doing coverage audits, grep for non-exported functions and test them explicitly (copying implementation if needed for unit tests).
+
+
+### 2026-03-19: Beta Channel & Auto-Update Opt-Out Tests
+
+**Task:** Add tests for new update management features (beta channel selection + auto-update opt-out).
+
+**Baseline:** 338 tests passing (11 tests in settings-service.test.js)
+
+**Tests Added to test/settings-service.test.js:**
+1. autoUpdateEnabled defaults to true - verifies auto-update is enabled by default (user must explicitly opt-out)
+2. updateChannel defaults to stable - verifies stable channel is the default (beta is opt-in)
+
+**Final Results:** 340 tests passing (+2), all green
+
+**Key Context:** Both features already implemented in settings-service.js defaults. Tests confirm expected behavior: safe defaults (auto-update ON, stable channel) with user control to opt-out or switch to beta.

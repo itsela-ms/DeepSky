@@ -559,6 +559,18 @@ async function init() {
   maxConcurrentInput.value = settings.maxConcurrent;
   promptWorkdirInput.checked = !!settings.promptForWorkdir;
   defaultWorkdirInput.value = settings.defaultWorkdir || '';
+
+  // Update toggles
+  const autoUpdateToggle = document.getElementById('auto-update-enabled');
+  const betaChannelToggle = document.getElementById('beta-channel');
+  const betaChannelLabel = document.getElementById('beta-channel-label');
+
+  // Populate from settings
+  autoUpdateToggle.checked = settings.autoUpdateEnabled !== false; // default true
+  betaChannelToggle.checked = settings.updateChannel === 'beta';
+  betaChannelLabel.style.opacity = autoUpdateToggle.checked ? '1' : '0.5';
+  betaChannelToggle.disabled = !autoUpdateToggle.checked;
+
   lastExpandedSidebarWidth = settings.sidebarWidth || 280;
   sidebarHidden = !!settings.sidebarCollapsed;
   sidebarCollapsed = false;
@@ -3068,6 +3080,18 @@ btnPickDefaultWorkdir.addEventListener('click', async () => {
 btnClearDefaultWorkdir.addEventListener('click', () => {
   defaultWorkdirInput.value = '';
   window.api.updateSettings({ defaultWorkdir: '' });
+});
+
+autoUpdateToggle.addEventListener('change', (e) => {
+  window.api.updateSettings({ autoUpdateEnabled: e.target.checked });
+  betaChannelLabel.style.opacity = e.target.checked ? '1' : '0.5';
+  betaChannelToggle.disabled = !e.target.checked;
+  window.api.applyUpdateSettings();
+});
+
+betaChannelToggle.addEventListener('change', (e) => {
+  window.api.updateSettings({ updateChannel: e.target.checked ? 'beta' : 'stable' });
+  window.api.applyUpdateSettings();
 });
 
 // Notification functions

@@ -2,6 +2,16 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.8.8] - 2026-03-23
+
+### Added
+- **Beta channel** — opt into early access builds via Settings > Updates > Beta channel toggle
+- **Auto-update opt-out** — disable auto-updates entirely via Settings > Updates toggle
+- **macOS pre-release support** — CI marks beta tags (`v*-beta*`) as GitHub pre-releases
+
+### Changed
+- Update service now reads settings at startup and applies changes in real-time when toggles change
+
 ## [0.8.7] - 2026-03-23
 
 ### Fixed

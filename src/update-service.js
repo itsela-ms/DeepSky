@@ -4,17 +4,20 @@ const { ipcMain } = require('electron');
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 class UpdateService {
-  constructor(mainWindow) {
+  constructor(mainWindow, settingsService) {
     this.mainWindow = mainWindow;
+    this.settingsService = settingsService;
     this.status = 'idle'; // idle | checking | available | downloading | downloaded | not-available | error
     this.updateInfo = null;
     this.error = null;
     this.progress = null;
     this._checkTimer = null;
 
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.allowPrerelease = true;
+    // Read settings to configure
+    const settings = settingsService.get();
+    autoUpdater.allowPrerelease = (settings.updateChannel === 'beta');
+    autoUpdater.autoDownload = settings.autoUpdateEnabled;
+    autoUpdater.autoInstallOnAppQuit = settings.autoUpdateEnabled;
 
     autoUpdater.on('checking-for-update', () => {
       this.status = 'checking';
@@ -79,9 +82,16 @@ class UpdateService {
     ipcMain.handle('update:getStatus', () => {
       return { status: this.status, info: this.updateInfo, progress: this.progress, error: this.error };
     });
+
+    ipcMain.handle('update:applySettings', () => {
+      this.applySettings();
+    });
   }
 
   async checkOnStartup() {
+    const settings = this.settingsService.get();
+    if (!settings.autoUpdateEnabled) return; // respect opt-out
+
     // Delay startup check by 5 seconds to not block app launch
     setTimeout(async () => {
       try {
@@ -97,6 +107,8 @@ class UpdateService {
   _startPeriodicCheck() {
     if (this._checkTimer) clearInterval(this._checkTimer);
     this._checkTimer = setInterval(async () => {
+      const settings = this.settingsService.get();
+      if (!settings.autoUpdateEnabled) return;
       if (this.status === 'downloaded' || this.status === 'downloading') return;
       try {
         await autoUpdater.checkForUpdates();
@@ -104,6 +116,21 @@ class UpdateService {
         // Silent fail — next interval will retry
       }
     }, CHECK_INTERVAL_MS);
+  }
+
+  applySettings() {
+    const settings = this.settingsService.get();
+    autoUpdater.allowPrerelease = (settings.updateChannel === 'beta');
+    autoUpdater.autoDownload = settings.autoUpdateEnabled;
+    autoUpdater.autoInstallOnAppQuit = settings.autoUpdateEnabled;
+
+    if (!settings.autoUpdateEnabled) {
+      this.dispose(); // stop timer
+      this.status = 'idle';
+      this._send('update:status', { status: 'idle' });
+    } else if (!this._checkTimer) {
+      this._startPeriodicCheck();
+    }
   }
 
   dispose() {

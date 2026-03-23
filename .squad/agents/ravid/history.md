@@ -23,3 +23,15 @@ const normalized = path.resolve(filePath);
 ```
 
 **Lesson:** Path validation must happen on raw input before normalization. After `path.resolve()`, traversal attempts are already sanitized, making checks on the normalized result logically dead code. Always validate → then normalize → then check final result against expected boundaries (git root check still needed as defense-in-depth).
+
+### Auto-Update Settings UI (2026-03-19)
+**Context:** Added UI controls for auto-update toggle and beta channel selection per Itay's spec.
+
+**Changes:**
+- **index.html:** Added new "Updates" settings group with two checkboxes (auto-update enabled, beta channel) placed before the About section
+- **renderer.js:** Added initialization logic to populate toggles from settings (autoUpdateEnabled defaults to true, updateChannel 'beta' vs 'stable'), plus change handlers that call `window.api.applyUpdateSettings()` and manage beta channel label opacity/disabled state
+- **styles.css:** Verified `.toggle-label` already exists (used by prompt-workdir toggle)
+
+**Integration:** Event handlers call `window.api.applyUpdateSettings()` which Tomer is adding to preload.js. Beta channel toggle is disabled when auto-update is off.
+
+**Build:** `npm run build` succeeded.
