@@ -10,6 +10,7 @@ const { resolveSidebarDragWidth } = require('./sidebar-resize');
 const terminals = new Map();
 const sessionBusyState = new Map(); // sessionId → boolean (has recent pty output)
 const sessionAliveState = new Set(); // sessionIds with live pty processes
+const userClosedSessions = new Set(); // sessions explicitly closed by user — excluded from alive poll
 let activeSessionId = null;
 let allSessions = [];
 let searchQuery = '';
@@ -1031,9 +1032,11 @@ async function updateSessionBusyStates() {
         sessionBusyState.set(s.id, false);
       }
     }
-    // Sync alive state from main process
+    // Sync alive state from main process (exclude user-closed sessions)
     sessionAliveState.clear();
-    for (const id of newAlive) sessionAliveState.add(id);
+    for (const id of newAlive) {
+      if (!userClosedSessions.has(id)) sessionAliveState.add(id);
+    }
     // Clear stale entries
     for (const id of sessionBusyState.keys()) {
       if (!newAlive.has(id)) {
@@ -1825,6 +1828,7 @@ async function closeTab(sessionId) {
     terminals.delete(sessionId);
   }
   sessionAliveState.delete(sessionId);
+  userClosedSessions.add(sessionId);
   sessionBusyState.delete(sessionId);
   sessionIdleCount.delete(sessionId);
   sessionLastUsed.delete(sessionId);
@@ -3265,7 +3269,10 @@ document.addEventListener('keydown', (e) => {
   if (mod && e.shiftKey && e.key === 'T') {
     e.preventDefault();
     const sessionId = recentlyClosedSessions.pop();
-    if (sessionId) openSession(sessionId);
+    if (sessionId) {
+      userClosedSessions.delete(sessionId);
+      openSession(sessionId);
+    }
   }
 
   // Ctrl/Cmd+I: Toggle status panel

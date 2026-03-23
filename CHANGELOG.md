@@ -2,6 +2,11 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.8.7] - 2026-03-23
+
+### Fixed
+- **Closed sessions persisting in active list** — sessions closed via the X button no longer reappear as "Idle" after the status poll cycle. A `userClosedSessions` set now prevents the poll from re-adding killed sessions to the alive state.
+
 ## [0.8.6] - 2026-03-19
 
 ### Added
