@@ -79,17 +79,15 @@ class SessionService {
           title = title.replace(/^"/, '').replace(/"$/, '');
           if (title.startsWith("Use the 'knowledge-based-answer'")) {
             const match = title.match(/answer:\s*(.+)/);
-            title = match ? match[1].substring(0, 60) : title.substring(0, 60);
+            title = match ? match[1] : title;
           }
           if (title.startsWith('Follow the workflow')) {
             title = title.substring(0, 60);
           }
         }
 
-        // Truncate long titles
-        if (title.length > 70) {
-          title = title.substring(0, 67) + '...';
-        }
+        // Condense to 1-3 key words for quick recognition
+        title = this._condenseTitle(title);
       }
 
       // Resolve cwd: .deepsky-cwd override → workspace.yaml cwd
@@ -148,6 +146,34 @@ class SessionService {
   _normalizeSearchText(value) {
     if (!value) return '';
     return String(value).replace(/\s+/g, ' ').trim();
+  }
+
+  _condenseTitle(title) {
+    if (!title) return title;
+
+    // Strip common filler prefixes
+    const stripped = title
+      .replace(/^(please |can you |i want to |i need to |let's |go to |go |look at |help me )/i, '')
+      .replace(/^(create |add |fix |update |implement |build |write |set up |configure |investigate )/i, (m) => m)
+      .trim();
+
+    // Split into words, remove noise words, take up to 3 meaningful ones
+    const noise = new Set(['the', 'a', 'an', 'and', 'or', 'for', 'to', 'in', 'of', 'with', 'on', 'is', 'it', 'that', 'this', 'my', 'our', 'from', 'by', 'be', 'as', 'at']);
+    const words = stripped.split(/\s+/).filter(w => w.length > 0);
+    const meaningful = [];
+    for (const word of words) {
+      if (meaningful.length >= 3) break;
+      const clean = word.replace(/[^a-zA-Z0-9_\-./]/g, '');
+      if (!clean) continue;
+      if (noise.has(clean.toLowerCase()) && meaningful.length > 0) continue;
+      meaningful.push(clean.charAt(0).toUpperCase() + clean.slice(1));
+    }
+
+    if (meaningful.length === 0) {
+      return title.length > 30 ? title.substring(0, 27) + '...' : title;
+    }
+
+    return meaningful.join(' ');
   }
 
   _buildSearchMatch(text, matchIndex, matchLength) {
