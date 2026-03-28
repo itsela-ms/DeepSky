@@ -52,6 +52,30 @@
   --bg-hover: rgba(30, 102, 245, 0.08);
 }
 
+[data-theme="midnight"] {
+  --bg-base: #1e2028;
+  --bg-surface: #282a36;
+  --bg-overlay: #161821;
+  --bg-mantle: #232530;
+  --text: #e8eaed;
+  --text-dim: #9aa0a6;
+  --text-dimmer: #5f6368;
+  --accent: #8ab4f8;
+  --accent-hover: #aecbfa;
+  --green: #81c995;
+  --red: #f28b82;
+  --yellow: #fdd663;
+  --mauve: #d7aefb;
+  --teal: #78d9ec;
+  --border: #383b4a;
+  --sidebar-width: 280px;
+  --term-bg: #1e2028;
+  --term-fg: #e8eaed;
+  --term-cursor: #e8eaed;
+  --term-selection: #383b4a;
+  --bg-hover: rgba(138, 180, 248, 0.10);
+}
+
 body {
   font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
   background: var(--bg-base);
@@ -1875,6 +1899,10 @@ body {
 
 .theme-option .theme-preview.light {
   background: linear-gradient(135deg, #eff1f5 50%, #e6e9ef 50%);
+}
+
+.theme-option .theme-preview.midnight {
+  background: linear-gradient(135deg, #1e2028 50%, #282a36 50%);
 }
 
 /* Status panel (right sidebar) */
