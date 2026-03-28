@@ -240,6 +240,130 @@ class StatusService {
   }
 
   /**
+   * Extract unified diffs for each changed file from events.jsonl.
+   * Reads tool.execution_complete events whose detailedContent contains a unified diff.
+   * Paths are made relative to the session's working directory.
+   * Only includes files with actual additions or deletions.
+   */
+  async getSessionDiffs(sessionId) {
+    const sessionDir = path.join(this.sessionStateDir, sessionId);
+    const eventsPath = path.join(sessionDir, 'events.jsonl');
+    try { await fs.promises.access(eventsPath); } catch { return []; }
+
+    const fileDiffs = new Map();// fullPath → { action, hunks: string[] }
+
+    return new Promise((resolve) => {
+      const stream = fs.createReadStream(eventsPath, { encoding: 'utf8' });
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+      rl.on('line', (line) => {
+        try {
+          const event = JSON.parse(line);
+          if (event.type !== 'tool.execution_complete') return;
+          if (!event.data?.result?.detailedContent) return;
+
+          const diff = event.data.result.detailedContent;
+          if (!diff.includes('@@') || !diff.includes('diff --git')) return;
+
+          // Only include diffs that have actual additions or deletions
+          const lines = diff.split('\n');
+          let hasChanges = false;
+          for (const l of lines) {
+            if (l.startsWith('@@') || l.startsWith('diff ') || l.startsWith('index ') ||
+                l.startsWith('---') || l.startsWith('+++') || l.startsWith('create ') ||
+                l.startsWith('new file')) continue;
+            if (l.startsWith('+') || l.startsWith('-')) { hasChanges = true; break; }
+          }
+          if (!hasChanges) return;
+
+          const pathMatch = diff.match(/\+\+\+ b\/(.+)/);
+          if (!pathMatch) return;
+
+          const fullPath = pathMatch[1].replace(/\\/g, '/');
+
+          // Skip session-internal files, temp files, and non-source files
+          if (fullPath.includes('.copilot/session-state/')) return;
+          if (fullPath.includes('/AppData/')) return;
+          if (fullPath.includes('/Temp/')) return;
+
+          // Normalize: ensure paths have consistent format
+          // Skip paths that are just directory names (no extension and no filename)
+          const lastSegment = fullPath.split('/').pop();
+          if (!lastSegment || !lastSegment.includes('.')) return;
+
+          const isCreate = diff.includes('create file mode') || diff.includes('--- a/dev/null');
+          const action = isCreate ? 'A' : 'M';
+
+          if (!fileDiffs.has(fullPath)) {
+            fileDiffs.set(fullPath, { action, lastDiff: diff });
+          } else {
+            // Keep only the latest diff for each file
+            fileDiffs.get(fullPath).lastDiff = diff;
+            if (isCreate) fileDiffs.get(fullPath).action = 'A';
+          }
+        } catch { /* skip */ }
+      });
+
+      rl.on('close', () => {
+        // Collect all full paths normalized
+        const allPaths = [...fileDiffs.keys()].map(p => p.replace(/\\/g, '/'));
+
+        // Find repo roots: group paths by their top-level directory structure
+        // Use the most frequent root prefix (handles mixed repos)
+        const rootCounts = new Map();
+        for (const p of allPaths) {
+          // Try extracting a repo-like prefix (e.g. C:/dev/DeepSky/)
+          const match = p.match(/^([A-Za-z]:\/[^/]+\/[^/]+\/)/);
+          if (match) {
+            const root = match[1];
+            rootCounts.set(root.toLowerCase(), (rootCounts.get(root.toLowerCase()) || 0) + 1);
+          }
+        }
+
+        // Use the most common root as the prefix to strip
+        let bestRoot = '';
+        let bestCount = 0;
+        for (const [root, count] of rootCounts) {
+          if (count > bestCount) { bestRoot = root; bestCount = count; }
+        }
+
+        // Deduplicate by case-insensitive relative path
+        const seen = new Map();
+        const result = [];
+        for (const [fullPath, data] of fileDiffs) {
+          let relPath = fullPath.replace(/\\/g, '/');
+
+          // Strip the most common root prefix
+          if (bestRoot && relPath.toLowerCase().startsWith(bestRoot)) {
+            relPath = relPath.substring(bestRoot.length);
+          } else if (/^[A-Za-z]:\//.test(relPath)) {
+            // Different repo — keep last 2 segments as fallback
+            const parts = relPath.split('/');
+            relPath = parts.slice(-2).join('/');
+          }
+          relPath = relPath.replace(/^\/+/, '');
+
+          const key = relPath.toLowerCase();
+          if (seen.has(key)) {
+            seen.get(key).diff = data.lastDiff;
+          } else {
+            const entry = {
+              path: relPath,
+              fullPath,
+              action: data.action,
+              diff: data.lastDiff,
+            };
+            seen.set(key, entry);
+            result.push(entry);
+          }
+        }
+        resolve(result);
+      });
+      rl.on('error', () => resolve([]));
+    });
+  }
+
+  /**
    * Extract key timeline events from events.jsonl.
    * Returns array of { time, type, text } (newest first, max 20).
    */

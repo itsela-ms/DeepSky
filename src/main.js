@@ -484,6 +484,10 @@ app.whenReady().then(async () => {
     return statusService.getSessionStatus(sessionId);
   });
 
+  ipcMain.handle('session:getDiffs', async (event, sessionId) => {
+    return statusService.getSessionDiffs(sessionId);
+  });
+
   // Forward pty output to renderer — batch at 16ms intervals to prevent IPC flooding
   const ptyDataBuffers = new Map(); // sessionId -> string[]
 
