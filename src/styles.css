@@ -1450,6 +1450,11 @@ body {
   justify-content: space-between;
   padding: 16px 20px;
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-surface);
+  z-index: 1;
+  border-radius: 12px 12px 0 0;
 }
 
 .settings-modal-header h2 {
