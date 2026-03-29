@@ -204,7 +204,7 @@ app.whenReady().then(async () => {
 
   createWindow();
 
-  updateService = new UpdateService(mainWindow);
+  updateService = new UpdateService(mainWindow, settingsService);
   mainWindow.webContents.on('did-finish-load', () => {
     updateService.checkOnStartup();
   });

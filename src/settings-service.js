@@ -15,6 +15,8 @@ const DEFAULTS = {
   zoomFactor: 1.0, // 0.75 – 1.5
   promptForWorkdir: false, // show directory picker when creating a new session
   defaultWorkdir: '', // default working directory for new sessions; empty = user home
+  autoUpdateEnabled: true, // false = no update checks or downloads
+  updateChannel: 'stable', // 'stable' | 'beta'
 };
 
 class SettingsService {

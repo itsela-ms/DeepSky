@@ -2,6 +2,27 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.9.0] - 2026-03-29
+
+### Added
+- **Settings redesigned with tabs** — General, Updates, Shortcuts, About; settings are now logically grouped instead of one long scroll
+- **Auto-update toggle** — enable or disable automatic update checking and installation from the Updates tab
+- **Beta channel opt-in** — "Early adopter" toggle to receive beta releases before general availability
+- **Browse/Clear buttons for default directory** — pick a working directory with a file browser instead of typing the path; clear it with one click
+- **Expandable tag overflow** — clicking the "+N" badge on a session card expands all hidden tags (was hover-only)
+- **Beta prerelease detection in CI** — builds from a `-beta` branch are automatically marked as prerelease on GitHub
+
+### Changed
+- **Settings modal width** increased from 420 to 480px with fixed-header/scrollable-body layout
+- **Modern toggle switches** — iOS/macOS-style toggles replace old checkbox-based controls throughout Settings
+- **Keyboard shortcuts moved** to a dedicated Shortcuts tab
+- **Theme selection moved** under General → Appearance
+- **Update service is now settings-driven** — auto-download, auto-install, and prerelease behavior reflect user preferences
+
+### Fixed
+- Settings modal header no longer disappears when scrolling through long settings
+- Tag expansion now uses explicit state instead of hover, preventing layout shifts
+
 ## [0.8.9] - 2026-03-23
 
 ### Fixed
