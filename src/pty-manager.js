@@ -25,18 +25,30 @@ class PtyManager extends EventEmitter {
     return crypto.randomUUID();
   }
 
-  _spawnArgs(extraArgs) {
-    if (this._useCmd) {
-      return { file: 'cmd.exe', args: ['/c', this.copilotPath, ...extraArgs] };
+  _resolveLauncher(launcher) {
+    if (launcher === 'agency' || launcher === 'copilot') return launcher;
+    return this.settingsService?.get().useAgencyCopilot ? 'agency' : 'copilot';
+  }
+
+  _spawnArgs(extraArgs, launcher) {
+    const resolvedLauncher = this._resolveLauncher(launcher);
+    if (resolvedLauncher === 'agency') {
+      if (process.platform === 'win32') {
+        return { file: 'cmd.exe', args: ['/c', 'agency', 'copilot', ...extraArgs], launcher: resolvedLauncher };
+      }
+      return { file: 'agency', args: ['copilot', ...extraArgs], launcher: resolvedLauncher };
     }
-    return { file: this.copilotPath, args: extraArgs };
+    if (this._useCmd) {
+      return { file: 'cmd.exe', args: ['/c', this.copilotPath, ...extraArgs], launcher: resolvedLauncher };
+    }
+    return { file: this.copilotPath, args: extraArgs, launcher: resolvedLauncher };
   }
 
   get maxConcurrent() {
     return this.settingsService?.get().maxConcurrent || 5;
   }
 
-  openSession(sessionId, cwd) {
+  openSession(sessionId, cwd, launcher) {
     // If already alive, just return the id
     if (this.sessions.has(sessionId) && this.sessions.get(sessionId).alive) {
       return sessionId;
@@ -53,7 +65,9 @@ class PtyManager extends EventEmitter {
     const spawnCwd = cwd || os.homedir();
     let ptyProcess;
     try {
-      const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
+      const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+      launcher = spawnConfig.launcher;
+      const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
         name: 'xterm-256color',
         cols: 120,
@@ -65,7 +79,9 @@ class PtyManager extends EventEmitter {
       // If spawn fails with given cwd, retry with homedir
       if (cwd && cwd !== os.homedir()) {
         try {
-          const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
+          const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+          launcher = spawnConfig.launcher;
+          const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {
             name: 'xterm-256color',
             cols: 120,
@@ -89,7 +105,8 @@ class PtyManager extends EventEmitter {
       openedAt: Date.now(),
       lastDataAt: null,
       dataBytesSinceIdle: 0,
-      cwd: spawnCwd
+      cwd: spawnCwd,
+      launcher: this._resolveLauncher(launcher)
     };
 
     ptyProcess.onData((data) => {
@@ -120,7 +137,7 @@ class PtyManager extends EventEmitter {
     return sessionId;
   }
 
-  newSession(cwd) {
+  newSession(cwd, launcher) {
     const sessionId = this._generateId();
 
     this._evictIfNeeded();
@@ -128,7 +145,9 @@ class PtyManager extends EventEmitter {
     const spawnCwd = cwd || os.homedir();
     let ptyProcess;
     try {
-      const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
+      const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+      launcher = spawnConfig.launcher;
+      const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
         name: 'xterm-256color',
         cols: 120,
@@ -139,7 +158,9 @@ class PtyManager extends EventEmitter {
     } catch (err) {
       if (cwd && cwd !== os.homedir()) {
         try {
-          const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
+          const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+          launcher = spawnConfig.launcher;
+          const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {
             name: 'xterm-256color',
             cols: 120,
@@ -161,7 +182,8 @@ class PtyManager extends EventEmitter {
       openedAt: Date.now(),
       lastDataAt: null,
       dataBytesSinceIdle: 0,
-      cwd: spawnCwd
+      cwd: spawnCwd,
+      launcher: this._resolveLauncher(launcher)
     };
 
     ptyProcess.onData((data) => {
@@ -213,7 +235,7 @@ class PtyManager extends EventEmitter {
     this.sessions.delete(sessionId);
   }
 
-  warmUp(cwd) {
+  warmUp(cwd, launcher) {
     if (this._standby && this._standby.alive) return;
     this._standby = null;
 
@@ -224,7 +246,8 @@ class PtyManager extends EventEmitter {
     const sessionId = this._generateId();
     const spawnCwd = cwd || os.homedir();
     try {
-      const { file, args } = this._spawnArgs(['--resume', sessionId, '--yolo']);
+      const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+      const { file, args } = spawnConfig;
       const ptyProcess = this._pty.spawn(file, args, {
         name: 'xterm-256color',
         cols: 120,
@@ -237,6 +260,7 @@ class PtyManager extends EventEmitter {
         id: sessionId,
         pty: ptyProcess,
         cwd: spawnCwd,
+        launcher: spawnConfig.launcher,
         bufferedData: [],
         alive: true,
         claimed: false
@@ -261,12 +285,13 @@ class PtyManager extends EventEmitter {
     }
   }
 
-  claimStandby(cwd) {
+  claimStandby(cwd, launcher) {
     const standby = this._standby;
     if (!standby || !standby.alive) return null;
 
     const spawnCwd = cwd || os.homedir();
-    if (standby.cwd !== spawnCwd) {
+    const resolvedLauncher = this._resolveLauncher(launcher);
+    if (standby.cwd !== spawnCwd || standby.launcher !== resolvedLauncher) {
       // CWD mismatch — discard standby
       try { standby.pty.kill(); } catch {}
       standby.alive = false;
@@ -285,7 +310,8 @@ class PtyManager extends EventEmitter {
       openedAt: Date.now(),
       lastDataAt: standby.bufferedData.length > 0 ? Date.now() : null,
       dataBytesSinceIdle: 0,
-      cwd: standby.cwd
+      cwd: standby.cwd,
+      launcher: standby.launcher
     };
 
     standby.pty.onData((data) => {

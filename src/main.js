@@ -94,6 +94,10 @@ const COPILOT_CONFIG_DIR = path.join(os.homedir(), '.copilot');
 const NOTIFICATIONS_DIR = path.join(COPILOT_CONFIG_DIR, 'notifications');
 const INSTRUCTIONS_PATH = path.join(COPILOT_CONFIG_DIR, 'copilot-instructions.md');
 
+function getNewSessionLauncher(settings) {
+  return settings?.useAgencyCopilot ? 'agency' : 'copilot';
+}
+
 function resolveCopilotPath() {
   const { execSync } = require('child_process');
   // 1. Check PATH for copilot binary (copilot.exe and copilot.cmd on Windows)
@@ -211,16 +215,21 @@ app.whenReady().then(async () => {
 
   // IPC: Open/resume a session
   ipcMain.handle('session:open', async (event, sessionId) => {
-    const cwd = await sessionService.getCwd(sessionId);
-    return ptyManager.openSession(sessionId, cwd || undefined);
+    const [cwd, launcher] = await Promise.all([
+      sessionService.getCwd(sessionId),
+      sessionService.getLauncher(sessionId),
+    ]);
+    return ptyManager.openSession(sessionId, cwd || undefined, launcher);
   });
 
   // IPC: Start a new session
   ipcMain.handle('session:new', async (event, cwd) => {
+    const launcher = getNewSessionLauncher(settingsService.get());
     // Try pre-warmed standby for instant startup
-    const claimed = ptyManager.claimStandby(cwd || undefined);
+    const claimed = ptyManager.claimStandby(cwd || undefined, launcher);
     if (claimed) {
       if (cwd) await sessionService.saveCwd(claimed.id, cwd);
+      await sessionService.saveLauncher(claimed.id, launcher);
       // Flush buffered startup output to renderer
       if (claimed.bufferedData.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('pty:data', {
@@ -233,10 +242,11 @@ app.whenReady().then(async () => {
     }
 
     // Cold start fallback
-    const sessionId = ptyManager.newSession(cwd || undefined);
+    const sessionId = ptyManager.newSession(cwd || undefined, launcher);
     if (cwd) {
       await sessionService.saveCwd(sessionId, cwd);
     }
+    await sessionService.saveLauncher(sessionId, launcher);
     scheduleWarmUp();
     return sessionId;
   });
@@ -255,10 +265,11 @@ app.whenReady().then(async () => {
   // IPC: Change working directory of a session (save + kill + respawn)
   const cwdChangingSessions = new Set();
   ipcMain.handle('session:changeCwd', async (event, sessionId, cwd) => {
+    const launcher = await sessionService.getLauncher(sessionId);
     await sessionService.saveCwd(sessionId, cwd);
     cwdChangingSessions.add(sessionId);
     ptyManager.kill(sessionId);
-    const result = ptyManager.openSession(sessionId, cwd);
+    const result = ptyManager.openSession(sessionId, cwd, launcher);
     cwdChangingSessions.delete(sessionId);
     return result;
   });
@@ -513,7 +524,7 @@ app.whenReady().then(async () => {
       const settings = settingsService.get();
       if (settings.promptForWorkdir) return;
       const cwd = settings.defaultWorkdir || undefined;
-      ptyManager.warmUp(cwd);
+      ptyManager.warmUp(cwd, getNewSessionLauncher(settings));
     }, 3000);
   }
   scheduleWarmUp();

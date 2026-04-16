@@ -8,6 +8,10 @@ class SessionService {
     this.dir = sessionStateDir;
   }
 
+  _normalizeLauncher(value) {
+    return String(value || '').trim().toLowerCase() === 'agency' ? 'agency' : 'copilot';
+  }
+
   async listSessions() {
     const entries = await fs.promises.readdir(this.dir, { withFileTypes: true });
     const dirs = entries.filter(e => e.isDirectory());
@@ -473,6 +477,25 @@ class SessionService {
       if (meta.cwd) return meta.cwd;
     } catch {}
     return '';
+  }
+
+  async saveLauncher(sessionId, launcher) {
+    const sessionDir = path.join(this.dir, sessionId);
+    await fs.promises.mkdir(sessionDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(sessionDir, '.deepsky-launcher'),
+      this._normalizeLauncher(launcher),
+      'utf8'
+    );
+  }
+
+  async getLauncher(sessionId) {
+    const sessionDir = path.join(this.dir, sessionId);
+    try {
+      const launcher = await fs.promises.readFile(path.join(sessionDir, '.deepsky-launcher'), 'utf8');
+      return this._normalizeLauncher(launcher);
+    } catch {}
+    return 'copilot';
   }
 
   async renameSession(sessionId, title) {

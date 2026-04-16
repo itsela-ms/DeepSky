@@ -2,6 +2,15 @@
 
 All notable changes to DeepSky are documented here.
 
+## [0.9.1-beta.1] - 2026-04-16
+
+### Added
+- **Agency launcher toggle** — choose `agency copilot` for new sessions from General settings when you want to start DeepSky sessions through Agency instead of the default Copilot CLI command
+
+### Changed
+- **Per-session launcher persistence** — DeepSky now remembers whether a session was started with Copilot CLI or `agency copilot`, so reopen and working-directory changes keep using the same launcher
+- **Standby session matching** — prewarmed sessions now track their launcher choice so DeepSky only reuses standby sessions when both the working directory and launcher match
+
 ## [0.9.0] - 2026-03-29
 
 ### Added

@@ -30,6 +30,10 @@ describe('SettingsService', () => {
     it('theme defaults to mocha', () => {
       expect(svc.get().theme).toBe('mocha');
     });
+
+    it('useAgencyCopilot defaults to false', () => {
+      expect(svc.get().useAgencyCopilot).toBe(false);
+    });
   });
 
   describe('update + persistence', () => {
@@ -43,6 +47,13 @@ describe('SettingsService', () => {
       const svc2 = new SettingsService(tmpDir);
       await svc2.load();
       expect(svc2.get().promptForWorkdir).toBe(false);
+    });
+
+    it('persists useAgencyCopilot across load', async () => {
+      await svc.update({ useAgencyCopilot: true });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().useAgencyCopilot).toBe(true);
     });
 
     it('rejects unknown settings keys', async () => {

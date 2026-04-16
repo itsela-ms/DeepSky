@@ -137,6 +137,26 @@ describe('SessionService', () => {
     });
   });
 
+  describe('launcher persistence', () => {
+    it('defaults launcher to copilot when unset', async () => {
+      await createSession('launcher-default', 'summary: launcher default');
+      const launcher = await svc.getLauncher('launcher-default');
+      expect(launcher).toBe('copilot');
+    });
+
+    it('persists agency launcher across load', async () => {
+      await svc.saveLauncher('launcher-agency', 'agency');
+      const launcher = await svc.getLauncher('launcher-agency');
+      expect(launcher).toBe('agency');
+    });
+
+    it('normalizes unknown launcher values back to copilot', async () => {
+      await svc.saveLauncher('launcher-invalid', 'something-else');
+      const launcher = await svc.getLauncher('launcher-invalid');
+      expect(launcher).toBe('copilot');
+    });
+  });
+
   describe('searchSessions', () => {
     it('finds matches in event transcript content', async () => {
       await createSession('search-hit', 'summary: first session', {

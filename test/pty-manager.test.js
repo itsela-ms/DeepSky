@@ -16,8 +16,8 @@ function createMockPty() {
 
 const mockPtyModule = { spawn: vi.fn(() => createMockPty()) };
 
-function createManager(maxConcurrent = 5) {
-  const settingsService = { get: () => ({ maxConcurrent }) };
+function createManager(settings = {}) {
+  const settingsService = { get: () => ({ maxConcurrent: 5, useAgencyCopilot: false, ...settings }) };
   return new PtyManager('/fake/copilot', settingsService, mockPtyModule);
 }
 
@@ -33,6 +33,8 @@ describe('PtyManager', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     manager = createManager();
+    mockPtyModule.spawn.mockClear();
+    mockPtyModule.spawn.mockImplementation(() => createMockPty());
   });
 
   describe('lastDataAt tracking', () => {
@@ -262,6 +264,34 @@ describe('PtyManager', () => {
 
       // Restore default
       mockPtyModule.spawn.mockImplementation(() => createMockPty());
+    });
+  });
+
+  describe('launcher selection', () => {
+    it('uses agency copilot for new sessions when enabled in settings', () => {
+      manager = createManager({ useAgencyCopilot: true });
+      const id = manager.newSession('/agency/project');
+      const [file, args, options] = mockPtyModule.spawn.mock.calls[0];
+
+      if (process.platform === 'win32') {
+        expect(file).toBe('cmd.exe');
+        expect(args).toEqual(['/c', 'agency', 'copilot', '--resume', id, '--yolo']);
+      } else {
+        expect(file).toBe('agency');
+        expect(args).toEqual(['copilot', '--resume', id, '--yolo']);
+      }
+      expect(options.cwd).toBe('/agency/project');
+    });
+
+    it('rejects standby sessions when launcher does not match', () => {
+      manager.warmUp('/cwd', 'agency');
+      const standbyPty = manager._standby.pty;
+
+      const result = manager.claimStandby('/cwd', 'copilot');
+
+      expect(result).toBeNull();
+      expect(standbyPty.kill).toHaveBeenCalled();
+      expect(manager._standby).toBeNull();
     });
   });
 

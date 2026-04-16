@@ -97,6 +97,7 @@ const emptyState = document.getElementById('empty-state');
 const btnNew = document.getElementById('btn-new');
 const btnNewCenter = document.getElementById('btn-new-center');
 const maxConcurrentInput = document.getElementById('max-concurrent');
+const useAgencyCopilotInput = document.getElementById('use-agency-copilot');
 const promptWorkdirInput = document.getElementById('prompt-workdir');
 const defaultWorkdirInput = document.getElementById('default-workdir');
 const btnPickDefaultWorkdir = document.getElementById('btn-pick-default-workdir');
@@ -554,6 +555,7 @@ async function init() {
   const settings = await window.api.getSettings();
   window._cachedSettings = settings;
   maxConcurrentInput.value = settings.maxConcurrent;
+  useAgencyCopilotInput.checked = !!settings.useAgencyCopilot;
   promptWorkdirInput.checked = !!settings.promptForWorkdir;
   defaultWorkdirInput.value = settings.defaultWorkdir || '';
   autoUpdateToggle.checked = settings.autoUpdateEnabled !== false;
@@ -2759,6 +2761,10 @@ btnNewCenter.addEventListener('click', newSession);
 maxConcurrentInput.addEventListener('change', (e) => {
   const val = parseInt(e.target.value, 10);
   if (val >= 1 && val <= 20) window.api.updateSettings({ maxConcurrent: val });
+});
+
+useAgencyCopilotInput.addEventListener('change', (e) => {
+  window.api.updateSettings({ useAgencyCopilot: e.target.checked });
 });
 
 promptWorkdirInput.addEventListener('change', (e) => {

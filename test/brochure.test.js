@@ -107,7 +107,7 @@ describeIfBrochure('Feature list completeness', () => {
 describeIfBrochure('"What\'s New" section accuracy', () => {
   it('changelog latest version matches brochure "What\'s New" version', () => {
     // Extract first version from changelog
-    const changelogMatch = changelog.match(/##\s*\[(\d+\.\d+\.\d+)\]/);
+    const changelogMatch = changelog.match(/##\s*\[(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)\]/);
     expect(changelogMatch).not.toBeNull();
     const latestChangelogVersion = changelogMatch[1];
 
