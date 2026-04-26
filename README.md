@@ -5,7 +5,6 @@
 Stop juggling session IDs. DeepSky gives you a sleek desktop app to manage, search, and switch between all your Copilot CLI sessions — so you can focus on building, not bookkeeping.
 
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
-![macOS](https://img.shields.io/badge/platform-macOS-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
@@ -29,11 +28,11 @@ Copilot CLI is powerful, but managing sessions is painful. You're copying UUIDs,
 
 ### Smart Search & Resources
 - Find sessions by title, tags, PR numbers, work item IDs, or repo names
-- **Resource panel** — every session shows its linked PRs, work items, repos, and wiki pages as clickable links
+- **Session Status resources** — every session shows linked PRs, work items, repos, wiki pages, and saved links inside the Session Status panel
 
 ### Notifications
 - Real-time alerts when tasks complete, sessions error out, or input is needed
-- Badge counter, dropdown panel, toast popups, and native OS notifications
+- Badge counter, dropdown panel, and DeepSky toast popups
 - Never miss a completed build or a session waiting for input again
 
 ### Custom Instructions
@@ -50,19 +49,11 @@ Copilot CLI is powerful, but managing sessions is painful. You're copying UUIDs,
 
 ### Windows Installer (recommended)
 
-1. Download the latest `DeepSky Setup x.x.x.exe` from [**Releases**](https://github.com/itsela-ms/DeepSky/releases)
+1. Download the latest `DeepSky-Setup-x.x.x.exe` from [**Releases**](https://github.com/itsela-ms/DeepSky/releases)
 2. Run the installer — installs to your user profile with a Start Menu entry
 3. Launch DeepSky from the Start Menu
 
 > **Prerequisite:** [GitHub Copilot CLI](https://github.com/github/copilot-cli) — `winget install github.copilot`
-
-### macOS Installer
-
-1. Download the latest `DeepSky-x.x.x.dmg` from [**Releases**](https://github.com/itsela-ms/DeepSky/releases)
-2. Open the DMG and drag DeepSky to Applications
-3. Launch DeepSky from Applications or Spotlight
-
-> **Prerequisite:** [GitHub Copilot CLI](https://github.com/github/copilot-cli) — `brew install github/gh/copilot`
 
 ### From Source
 

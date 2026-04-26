@@ -11,6 +11,13 @@ const StatusService = require('./status-service');
 const SettingsService = require('./settings-service');
 const NotificationService = require('./notification-service');
 const UpdateService = require('./update-service');
+const {
+  calculateNotificationPosition,
+  isValidSessionId,
+  pickNotificationDisplay,
+  resolveAgencyInfo,
+  resolveCopilotPath,
+} = require('./app-support');
 
 // Prevent Chromium GPU compositing artifacts(rectangular patches of wrong shade on dark backgrounds)
 app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -24,21 +31,16 @@ let activeNotifWindows = [];
 const notifWindowData = new Map();
 
 function showNotificationPopup(notification) {
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { workArea } = primaryDisplay;
-
-  const NOTIF_WIDTH = 360;
-  const NOTIF_HEIGHT = 100; // tall enough for title + body + padding
-  const PADDING = 20;
-  const STACK_GAP = 8;
-
-  const stackOffset = activeNotifWindows.length * (NOTIF_HEIGHT + STACK_GAP);
-  const x = Math.round(workArea.x + workArea.width - NOTIF_WIDTH - PADDING);
-  const y = Math.round(workArea.y + workArea.height - NOTIF_HEIGHT - PADDING - stackOffset);
+  const preferredDisplay = pickNotificationDisplay(
+    screen.getAllDisplays(),
+    mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null
+  ) || screen.getPrimaryDisplay();
+  const { workArea } = preferredDisplay;
+  const { x, y, width, height } = calculateNotificationPosition(workArea, activeNotifWindows.length);
 
   const notifWin = new BrowserWindow({
-    width: NOTIF_WIDTH,
-    height: NOTIF_HEIGHT,
+    width,
+    height,
     x,
     y,
     frame: false,
@@ -95,34 +97,18 @@ const NOTIFICATIONS_DIR = path.join(COPILOT_CONFIG_DIR, 'notifications');
 const INSTRUCTIONS_PATH = path.join(COPILOT_CONFIG_DIR, 'copilot-instructions.md');
 
 function getNewSessionLauncher(settings) {
-  return settings?.useAgencyCopilot ? 'agency' : 'copilot';
+  return settings?.useAgencyCopilot && resolveAgencyInfo().found ? 'agency' : 'copilot';
 }
 
-function resolveCopilotPath() {
-  const { execSync } = require('child_process');
-  // 1. Check PATH for copilot binary (copilot.exe and copilot.cmd on Windows)
-  const names = ['copilot.exe', 'copilot.cmd'];
-  for (const bin of names) {
-    const whichCmd = `where ${bin}`;
-    try {
-      const result = execSync(whichCmd, { encoding: 'utf8', timeout: 5000 }).trim();
-      const firstMatch = result.split(/\r?\n/)[0];
-      if (firstMatch && fs.existsSync(firstMatch)) return firstMatch;
-    } catch {}
+function requireValidSessionId(sessionId) {
+  if (!isValidSessionId(sessionId)) {
+    throw new Error('Invalid session ID.');
   }
+  return sessionId;
+}
 
-  // 2. Known install locations
-  const candidates = [
-    path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'copilot.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'copilot-cli', 'copilot.exe'),
-    path.join(process.env.PROGRAMFILES || '', 'GitHub Copilot CLI', 'copilot.exe'),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-
-  // 3. Fall back to bare command name — let the OS resolve it at spawn time
-  return bin;
+function getAugmentedSettings(settings) {
+  return { ...settings, agencyAvailable: resolveAgencyInfo().found };
 }
 
 function createWindow() {
@@ -162,7 +148,19 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }
 
-app.whenReady().then(async () => {
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(async () => {
   settingsService = new SettingsService(COPILOT_CONFIG_DIR);
   await settingsService.load();
 
@@ -215,6 +213,7 @@ app.whenReady().then(async () => {
 
   // IPC: Open/resume a session
   ipcMain.handle('session:open', async (event, sessionId) => {
+    sessionId = requireValidSessionId(sessionId);
     const [cwd, launcher] = await Promise.all([
       sessionService.getCwd(sessionId),
       sessionService.getLauncher(sessionId),
@@ -265,13 +264,34 @@ app.whenReady().then(async () => {
   // IPC: Change working directory of a session (save + kill + respawn)
   const cwdChangingSessions = new Set();
   ipcMain.handle('session:changeCwd', async (event, sessionId, cwd) => {
+    sessionId = requireValidSessionId(sessionId);
+    if (typeof cwd !== 'string' || !cwd.trim()) {
+      throw new Error('Invalid working directory.');
+    }
+    const previousCwd = await sessionService.getCwd(sessionId);
     const launcher = await sessionService.getLauncher(sessionId);
     await sessionService.saveCwd(sessionId, cwd);
+    statusService.invalidateSession(sessionId);
     cwdChangingSessions.add(sessionId);
-    ptyManager.kill(sessionId);
-    const result = ptyManager.openSession(sessionId, cwd, launcher);
-    cwdChangingSessions.delete(sessionId);
-    return result;
+    try {
+      ptyManager.kill(sessionId);
+      return ptyManager.openSession(sessionId, cwd, launcher);
+    } catch (error) {
+      if (!previousCwd) {
+        await sessionService.clearCwd(sessionId);
+      } else {
+        await sessionService.saveCwd(sessionId, previousCwd);
+      }
+      statusService.invalidateSession(sessionId);
+      try {
+        ptyManager.openSession(sessionId, previousCwd, launcher);
+      } catch (restoreError) {
+        error.message = `${error.message} (failed to restore previous session: ${restoreError.message})`;
+      }
+      throw error;
+    } finally {
+      cwdChangingSessions.delete(sessionId);
+    }
   });
 
   // IPC: Write to a session's pty
@@ -290,24 +310,31 @@ app.whenReady().then(async () => {
   });
 
   // IPC: Get settings
-  ipcMain.handle('settings:get', () => {
-    return settingsService.get();
+  ipcMain.handle('settings:get', async () => {
+    return getAugmentedSettings(settingsService.get());
   });
 
   // IPC: Update settings
   ipcMain.handle('settings:update', async (event, partial) => {
-    const updated = await settingsService.update(partial);
+    const sanitized = { ...partial };
+    if (sanitized.useAgencyCopilot && !resolveAgencyInfo().found) {
+      sanitized.useAgencyCopilot = false;
+    }
+    const updated = await settingsService.update(sanitized);
     ptyManager.updateSettings(updated);
+    if ('useAgencyCopilot' in sanitized || 'defaultWorkdir' in sanitized || 'promptForWorkdir' in sanitized) {
+      scheduleWarmUp();
+    }
 
     // Update window chrome for theme changes
-    if (partial.theme && mainWindow && !mainWindow.isDestroyed()) {
-      const bg = partial.theme === 'latte' ? '#eff1f5' : '#1e1e2e';
-      const fg = partial.theme === 'latte' ? '#4c4f69' : '#cdd6f4';
+    if (sanitized.theme && mainWindow && !mainWindow.isDestroyed()) {
+      const bg = sanitized.theme === 'latte' ? '#eff1f5' : '#1e1e2e';
+      const fg = sanitized.theme === 'latte' ? '#4c4f69' : '#cdd6f4';
       mainWindow.setTitleBarOverlay({ color: bg, symbolColor: fg });
       mainWindow.setBackgroundColor(bg);
     }
 
-    return updated;
+    return getAugmentedSettings(updated);
   });
 
   // IPC: Zoom
@@ -390,9 +417,16 @@ app.whenReady().then(async () => {
   // IPC: App info
   ipcMain.handle('app:getVersion', () => app.getVersion());
   ipcMain.handle('app:getChangelog', () => {
-    try {
-      return fs.readFileSync(path.join(__dirname, '..', 'CHANGELOG.md'), 'utf-8');
-    } catch { return ''; }
+    const candidates = [
+      path.join(app.getAppPath(), 'CHANGELOG.md'),
+      path.join(__dirname, '..', 'CHANGELOG.md'),
+    ];
+    for (const candidate of candidates) {
+      try {
+        return fs.readFileSync(candidate, 'utf-8');
+      } catch {}
+    }
+    return '';
   });
 
   // Auto-notify on session exit
@@ -469,15 +503,28 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('session:getLastUserPrompt', async (event, sessionId) => {
+    sessionId = requireValidSessionId(sessionId);
     return sessionService.getLastUserPrompt(sessionId);
   });
 
   ipcMain.handle('session:rename', async (event, sessionId, title) => {
+    sessionId = requireValidSessionId(sessionId);
     await sessionService.renameSession(sessionId, title);
   });
 
+  ipcMain.handle('session:updateCwdMetadata', async (event, sessionId, cwd) => {
+    sessionId = requireValidSessionId(sessionId);
+    if (typeof cwd !== 'string' || !cwd.trim()) {
+      throw new Error('Invalid working directory.');
+    }
+    await sessionService.saveCwd(sessionId, cwd);
+    statusService.invalidateSession(sessionId);
+  });
+
   ipcMain.handle('session:delete', async (event, sessionId) => {
+    sessionId = requireValidSessionId(sessionId);
     ptyManager.kill(sessionId);
+    statusService.invalidateSession(sessionId);
     await sessionService.deleteSession(sessionId);
   });
 
@@ -492,7 +539,44 @@ app.whenReady().then(async () => {
 
   // IPC: Get session status (intent, summary, plan, timeline, files)
   ipcMain.handle('session:getStatus', async (event, sessionId) => {
+    sessionId = requireValidSessionId(sessionId);
     return statusService.getSessionStatus(sessionId);
+  });
+
+  ipcMain.handle('session:openGeneratedFile', async (event, sessionId, relativePath) => {
+    if (!isValidSessionId(sessionId) || typeof relativePath !== 'string' || !relativePath.trim()) {
+      return { ok: false, error: 'Invalid generated file request.' };
+    }
+
+    const sessionDir = path.resolve(SESSION_STATE_DIR, sessionId);
+    const targetPath = path.resolve(sessionDir, relativePath);
+    const filesRoot = path.resolve(sessionDir, 'files');
+    if (!targetPath.startsWith(filesRoot + path.sep) && targetPath !== filesRoot) {
+      return { ok: false, error: 'Generated file must be inside the session files folder.' };
+    }
+
+    let targetRealPath;
+    try {
+      const [filesRootRealPath, targetRealPath, targetStat] = await Promise.all([
+        fs.promises.realpath(filesRoot),
+        fs.promises.realpath(targetPath),
+        fs.promises.lstat(targetPath),
+      ]);
+      const validatedRealPath = targetRealPath;
+      if (
+        (!validatedRealPath.startsWith(filesRootRealPath + path.sep) && validatedRealPath !== filesRootRealPath) ||
+        targetStat.isSymbolicLink() ||
+        !targetStat.isFile()
+      ) {
+        return { ok: false, error: 'Generated file no longer exists.' };
+      }
+      targetRealPath = validatedRealPath;
+    } catch {
+      return { ok: false, error: 'Generated file no longer exists.' };
+    }
+
+    const error = await shell.openPath(targetRealPath);
+    return error ? { ok: false, error } : { ok: true };
   });
 
   // Forward pty output to renderer — batch at 16ms intervals to prevent IPC flooding
@@ -519,8 +603,13 @@ app.whenReady().then(async () => {
   });
 
   // Pre-warm a standby session for instant new-session creation
+  let warmUpTimer = null;
   function scheduleWarmUp() {
-    setTimeout(() => {
+    if (warmUpTimer) {
+      clearTimeout(warmUpTimer);
+    }
+    warmUpTimer = setTimeout(() => {
+      warmUpTimer = null;
       const settings = settingsService.get();
       if (settings.promptForWorkdir) return;
       const cwd = settings.defaultWorkdir || undefined;
@@ -528,13 +617,14 @@ app.whenReady().then(async () => {
     }, 3000);
   }
   scheduleWarmUp();
-});
+  });
 
-app.on('window-all-closed', () => {
+  app.on('window-all-closed', () => {
   tagIndexer.stop();
   resourceIndexer.stop();
   notificationService.stop();
   if (ptyFlushTimer) { clearTimeout(ptyFlushTimer); ptyFlushTimer = null; }
   ptyManager.killAll();
   app.quit();
-});
+  });
+}

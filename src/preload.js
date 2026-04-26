@@ -10,11 +10,13 @@ contextBridge.exposeInMainWorld('api', {
   addResource: (sessionId, url) => ipcRenderer.invoke('resource:add', sessionId, url),
   removeResource: (sessionId, key) => ipcRenderer.invoke('resource:remove', sessionId, key),
   getSessionStatus: (sessionId) => ipcRenderer.invoke('session:getStatus', sessionId),
+  openGeneratedFile: (sessionId, relativePath) => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath),
   openSession: (sessionId) => ipcRenderer.invoke('session:open', sessionId),
   newSession: (cwd) => ipcRenderer.invoke('session:new', cwd),
   killSession: (sessionId) => ipcRenderer.invoke('pty:kill', sessionId),
   pickDirectory: (defaultPath) => ipcRenderer.invoke('dialog:pickDirectory', defaultPath),
   changeCwd: (sessionId, cwd) => ipcRenderer.invoke('session:changeCwd', sessionId, cwd),
+  updateSessionCwdMetadata: (sessionId, cwd) => ipcRenderer.invoke('session:updateCwdMetadata', sessionId, cwd),
 
   // PTY I/O
   writePty: (sessionId, data) => ipcRenderer.send('pty:write', { sessionId, data }),

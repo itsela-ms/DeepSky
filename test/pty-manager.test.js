@@ -377,6 +377,22 @@ describe('PtyManager', () => {
       expect(manager._standby).toBeNull();
     });
 
+    it('updateSettings clears stale standby when launcher setting changes', () => {
+      manager.warmUp('/cwd', 'copilot');
+      const standbyPty = manager._standby.pty;
+      manager.updateSettings({ useAgencyCopilot: true, promptForWorkdir: false, defaultWorkdir: '/cwd' });
+      expect(standbyPty.kill).toHaveBeenCalled();
+      expect(manager._standby).toBeNull();
+    });
+
+    it('updateSettings clears standby when prompt-for-workdir is enabled', () => {
+      manager.warmUp('/cwd', 'copilot');
+      const standbyPty = manager._standby.pty;
+      manager.updateSettings({ useAgencyCopilot: false, promptForWorkdir: true, defaultWorkdir: '/cwd' });
+      expect(standbyPty.kill).toHaveBeenCalled();
+      expect(manager._standby).toBeNull();
+    });
+
     it('claimStandby returns null when no standby exists', () => {
       expect(manager.claimStandby('/cwd')).toBeNull();
     });

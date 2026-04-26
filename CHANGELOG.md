@@ -2,6 +2,21 @@
 
 All notable changes to DeepSky are documented here.
 
+## [1.0.0] - 2026-04-26
+
+### Added
+- **Colorized file diff previews** — hover a changed file in the Status panel to keep a real diff popover open, with red/green line styling instead of a plain tooltip
+
+### Changed
+- **Unified session metadata storage** — DeepSky now writes rename and working-directory updates into `workspace.yaml`, so the sidebar, tabs, and status panel read the same source of truth
+- **Live session refresh** — open sessions refresh their metadata during status polling, which keeps renamed sessions and directory changes in sync without reopening the app
+- **Generated file safety** — DeepSky now ignores symlinked generated-file entries and only opens files whose real path stays inside the session `files` directory
+
+### Fixed
+- `/rename` now updates the tab strip and sidebar title consistently after Copilot renames a session
+- Sidebar hide/show persistence now keeps collapsed-state settings aligned when restoring the UI
+- Session metadata writes are serialized per session so rename and working-directory updates do not overwrite each other
+
 ## [0.9.1-beta.1] - 2026-04-16
 
 ### Added
@@ -97,7 +112,7 @@ All notable changes to DeepSky are documented here.
 - **Keyboard shortcut** — `Ctrl+I` toggles the status panel; works even when terminal is focused
 
 ### Changed
-- **Repository migration** — DeepSky moved from `itsela-ms/DeepSky` to `itsela_microsoft/DeepSky` to enable community contributions. Auto-updater now points to the new repository — future updates arrive from the new location automatically.
+- **Repository publishing** — DeepSky updates continue to publish from the public `itsela-ms/DeepSky` repository so releases, feedback links, and auto-update all stay aligned.
 - **Update badge** — now shows immediately when a download starts (not just after completion); toast notification only fires after download completes
 - Resources (PRs, work items, pipelines, repos, links) are now displayed as sections inside the Status panel instead of the old dedicated Resource panel
 

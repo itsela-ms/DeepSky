@@ -403,7 +403,23 @@ class PtyManager extends EventEmitter {
   }
 
   updateSettings(settings) {
-    // Settings are persisted by SettingsService; just evict if needed
+    const standby = this._standby;
+    if (!standby || !standby.alive) return;
+
+    if (settings?.promptForWorkdir) {
+      try { standby.pty.kill(); } catch {}
+      standby.alive = false;
+      this._standby = null;
+      return;
+    }
+
+    const expectedLauncher = this._resolveLauncher(settings?.useAgencyCopilot ? 'agency' : 'copilot');
+    const expectedCwd = settings?.defaultWorkdir || os.homedir();
+    if (standby.launcher !== expectedLauncher || standby.cwd !== expectedCwd) {
+      try { standby.pty.kill(); } catch {}
+      standby.alive = false;
+      this._standby = null;
+    }
   }
 
   _evictIfNeeded() {

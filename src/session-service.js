@@ -2,14 +2,70 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const readline = require('readline');
-
+const { readPreferredSessionCwd } = require('./session-cwd');
 class SessionService {
   constructor(sessionStateDir) {
     this.dir = sessionStateDir;
+    this.m_workspaceMetaWrites = new Map();
+  }
+
+  _getSessionDir(sessionId) {
+    if (
+      typeof sessionId !== 'string' ||
+      !sessionId.trim() ||
+      path.basename(sessionId) !== sessionId ||
+      sessionId.includes('..')
+    ) {
+      throw new Error('Invalid session ID.');
+    }
+    return path.join(this.dir, sessionId);
   }
 
   _normalizeLauncher(value) {
     return String(value || '').trim().toLowerCase() === 'agency' ? 'agency' : 'copilot';
+  }
+
+  async _readWorkspaceMeta(sessionDir) {
+    try {
+      const yamlPath = path.join(sessionDir, 'workspace.yaml');
+      const yamlContent = await fs.promises.readFile(yamlPath, 'utf8');
+      return yaml.load(yamlContent) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  async _writeWorkspaceMeta(sessionDir, meta) {
+    await fs.promises.mkdir(sessionDir, { recursive: true });
+    const yamlPath = path.join(sessionDir, 'workspace.yaml');
+    const tempPath = path.join(
+      sessionDir,
+      `workspace.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+    );
+    await fs.promises.writeFile(tempPath, yaml.dump(meta, { lineWidth: -1 }), 'utf8');
+    await fs.promises.rename(tempPath, yamlPath);
+  }
+
+  async _updateWorkspaceMeta(sessionId, updater) {
+    const sessionDir = this._getSessionDir(sessionId);
+    const previous = this.m_workspaceMetaWrites.get(sessionId) || Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(async () => {
+        const meta = await this._readWorkspaceMeta(sessionDir);
+        const updated = await updater({ ...meta });
+        await this._writeWorkspaceMeta(sessionDir, updated);
+        return updated;
+      });
+
+    this.m_workspaceMetaWrites.set(sessionId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.m_workspaceMetaWrites.get(sessionId) === next) {
+        this.m_workspaceMetaWrites.delete(sessionId);
+      }
+    }
   }
 
   async listSessions() {
@@ -40,7 +96,7 @@ class SessionService {
   }
 
   async getLastUserPrompt(sessionId) {
-    const sessionDir = path.join(this.dir, sessionId);
+    const sessionDir = this._getSessionDir(sessionId);
     return this._extractLastUserPromptFromEvents(sessionDir);
   }
 
@@ -49,26 +105,43 @@ class SessionService {
     const yamlPath = path.join(sessionDir, 'workspace.yaml');
 
     try {
-      const yamlContent = await fs.promises.readFile(yamlPath, 'utf8');
+      const [yamlContent, yamlStat] = await Promise.all([
+        fs.promises.readFile(yamlPath, 'utf8'),
+        fs.promises.stat(yamlPath),
+      ]);
       const meta = yaml.load(yamlContent) || {};
 
       let title = null;
       let isCustomTitle = false;
+      let customTitleMtimeMs = 0;
 
-      // Check for manual rename (takes priority, never overridden)
       const customTitlePath = path.join(sessionDir, '.deepsky-title');
       try {
-        title = (await fs.promises.readFile(customTitlePath, 'utf8')).trim();
+        const [customTitle, customTitleStat] = await Promise.all([
+          fs.promises.readFile(customTitlePath, 'utf8'),
+          fs.promises.stat(customTitlePath),
+        ]);
+        title = customTitle.trim();
         isCustomTitle = !!title;
+        customTitleMtimeMs = customTitleStat.mtimeMs;
       } catch {
-        // No custom title — fall through to auto-detection
+        // No legacy custom title — fall through to workspace metadata
+      }
+
+      if (!title || (typeof meta.name === 'string' && meta.name.trim() && customTitleMtimeMs < yamlStat.mtimeMs)) {
+        title = typeof meta.name === 'string' && meta.name.trim()
+          ? meta.name.trim()
+          : null;
+        if (title) isCustomTitle = false;
       }
 
       if (!title) {
-        title = meta.summary || null;
+        title = typeof meta.summary === 'string' && meta.summary.trim()
+          ? meta.summary.trim()
+          : null;
       }
 
-      // If no summary, try to extract from first user message in events.jsonl
+      // If no workspace title, try to extract from first user message in events.jsonl
       if (!title) {
         title = await this._extractTitleFromEvents(sessionDir);
       }
@@ -96,12 +169,7 @@ class SessionService {
         }
       }
 
-      // Resolve cwd: .deepsky-cwd override → workspace.yaml cwd
-      let cwd = meta.cwd || '';
-      try {
-        const customCwd = (await fs.promises.readFile(path.join(sessionDir, '.deepsky-cwd'), 'utf8')).trim();
-        if (customCwd) cwd = customCwd;
-      } catch {}
+      const cwd = await readPreferredSessionCwd(sessionDir);
 
       const stat = await fs.promises.stat(sessionDir);
       return {
@@ -458,29 +526,32 @@ class SessionService {
     return cleaned;
   }
   async saveCwd(sessionId, cwd) {
-    const sessionDir = path.join(this.dir, sessionId);
-    await fs.promises.mkdir(sessionDir, { recursive: true });
-    await fs.promises.writeFile(path.join(sessionDir, '.deepsky-cwd'), cwd.trim(), 'utf8');
+    const sessionDir = this._getSessionDir(sessionId);
+    await this._updateWorkspaceMeta(sessionId, (meta) => ({
+      ...meta,
+      cwd: cwd.trim(),
+    }));
+    await fs.promises.rm(path.join(sessionDir, '.deepsky-cwd'), { force: true }).catch(() => {});
+  }
+
+  async clearCwd(sessionId) {
+    const sessionDir = this._getSessionDir(sessionId);
+    await this._updateWorkspaceMeta(sessionId, (meta) => {
+      delete meta.cwd;
+      return meta;
+    });
+    try {
+      await fs.promises.rm(path.join(sessionDir, '.deepsky-cwd'), { force: true });
+    } catch {}
   }
 
   async getCwd(sessionId) {
-    const sessionDir = path.join(this.dir, sessionId);
-    // 1. Check for DeepSky-managed cwd override
-    try {
-      const cwd = (await fs.promises.readFile(path.join(sessionDir, '.deepsky-cwd'), 'utf8')).trim();
-      if (cwd) return cwd;
-    } catch {}
-    // 2. Fallback to workspace.yaml cwd
-    try {
-      const yamlContent = await fs.promises.readFile(path.join(sessionDir, 'workspace.yaml'), 'utf8');
-      const meta = yaml.load(yamlContent);
-      if (meta.cwd) return meta.cwd;
-    } catch {}
-    return '';
+    const sessionDir = this._getSessionDir(sessionId);
+    return readPreferredSessionCwd(sessionDir);
   }
 
   async saveLauncher(sessionId, launcher) {
-    const sessionDir = path.join(this.dir, sessionId);
+    const sessionDir = this._getSessionDir(sessionId);
     await fs.promises.mkdir(sessionDir, { recursive: true });
     await fs.promises.writeFile(
       path.join(sessionDir, '.deepsky-launcher'),
@@ -490,7 +561,7 @@ class SessionService {
   }
 
   async getLauncher(sessionId) {
-    const sessionDir = path.join(this.dir, sessionId);
+    const sessionDir = this._getSessionDir(sessionId);
     try {
       const launcher = await fs.promises.readFile(path.join(sessionDir, '.deepsky-launcher'), 'utf8');
       return this._normalizeLauncher(launcher);
@@ -499,12 +570,16 @@ class SessionService {
   }
 
   async renameSession(sessionId, title) {
-    const customTitlePath = path.join(this.dir, sessionId, '.deepsky-title');
-    await fs.promises.writeFile(customTitlePath, title.trim(), 'utf8');
+    const sessionDir = this._getSessionDir(sessionId);
+    await this._updateWorkspaceMeta(sessionId, (meta) => ({
+      ...meta,
+      name: title.trim(),
+    }));
+    await fs.promises.rm(path.join(sessionDir, '.deepsky-title'), { force: true }).catch(() => {});
   }
 
   async deleteSession(sessionId) {
-    const sessionDir = path.join(this.dir, sessionId);
+    const sessionDir = this._getSessionDir(sessionId);
     await fs.promises.rm(sessionDir, { recursive: true, force: true });
   }
 }

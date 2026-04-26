@@ -41,31 +41,29 @@ describeIfBrochure('Brochure exists', () => {
 });
 
 describeIfBrochure('Version consistency', () => {
-  it('download URL contains current package.json version', () => {
-    const version = pkg.version;
-    const pattern = `DeepSky-Setup-${version}.exe`;
-    expect(brochure).toContain(pattern);
+  it('download button uses a versionless latest-release link', () => {
+    expect(brochure).toContain('https://github.com/itsela-ms/DeepSky/releases/latest');
+    expect(brochure).not.toMatch(/DeepSky-Setup-.*\.exe/);
   });
 
-  it('download button text shows current version', () => {
-    const version = pkg.version;
-    expect(brochure).toMatch(new RegExp(`Download v${version.replace(/\./g, '\\.')}`));
+  it('download button text avoids version labels', () => {
+    expect(brochure).toMatch(/Download Latest/);
+    expect(brochure).not.toMatch(/Download v\d+\.\d+\.\d+/);
   });
 
-  it('"What\'s New" section references current version', () => {
-    const version = pkg.version;
-    expect(brochure).toMatch(new RegExp(`What.*New.*v${version.replace(/\./g, '\\.')}`));
+  it('"What\'s New" heading avoids version labels', () => {
+    expect(brochure).toMatch(/What's New<\/h2>/);
+    expect(brochure).not.toMatch(/What's New in .*v\d+\.\d+\.\d+/);
   });
 });
 
 describeIfBrochure('Download links', () => {
-  it('download URL points to itsela-ms/DeepSky (primary repo)', () => {
-    expect(brochure).toContain('github.com/itsela-ms/DeepSky/releases/download/');
+  it('download link points to itsela-ms/DeepSky (primary repo)', () => {
+    expect(brochure).toContain('github.com/itsela-ms/DeepSky/releases/latest');
   });
 
-  it('download URL has correct tag format (vX.Y.Z)', () => {
-    const version = pkg.version;
-    expect(brochure).toContain(`/download/v${version}/DeepSky-Setup-${version}.exe`);
+  it('download link does not embed a specific release tag', () => {
+    expect(brochure).not.toMatch(/\/download\/v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?\//);
   });
 
   it('GitHub repo link points to itsela-ms/DeepSky', () => {
@@ -105,14 +103,18 @@ describeIfBrochure('Feature list completeness', () => {
 });
 
 describeIfBrochure('"What\'s New" section accuracy', () => {
-  it('changelog latest version matches brochure "What\'s New" version', () => {
-    // Extract first version from changelog
+  it('brochure keeps the heading generic even when changelog has prerelease versions', () => {
     const changelogMatch = changelog.match(/##\s*\[(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)\]/);
     expect(changelogMatch).not.toBeNull();
-    const latestChangelogVersion = changelogMatch[1];
+    expect(brochure).toContain("What's New</h2>");
+  });
+});
 
-    // Brochure should show the same version
-    expect(brochure).toContain(`v${latestChangelogVersion}`);
+describeIfBrochure('No beta wording', () => {
+  it('does not mention beta or prerelease versions anywhere in brochure copy', () => {
+    expect(brochure).not.toMatch(/\bbeta\b/i);
+    expect(brochure).not.toMatch(/\bprerelease\b|\bpre-release\b/i);
+    expect(brochure).not.toMatch(/v\d+\.\d+\.\d+-[A-Za-z0-9.-]+/);
   });
 });
 

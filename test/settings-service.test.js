@@ -34,6 +34,14 @@ describe('SettingsService', () => {
     it('useAgencyCopilot defaults to false', () => {
       expect(svc.get().useAgencyCopilot).toBe(false);
     });
+
+    it('statusPanelSections defaults to null', () => {
+      expect(svc.get().statusPanelSections).toBeNull();
+    });
+
+    it('sidebarHidden defaults to false', () => {
+      expect(svc.get().sidebarHidden).toBe(false);
+    });
   });
 
   describe('update + persistence', () => {
@@ -54,6 +62,20 @@ describe('SettingsService', () => {
       const svc2 = new SettingsService(tmpDir);
       await svc2.load();
       expect(svc2.get().useAgencyCopilot).toBe(true);
+    });
+
+    it('persists statusPanelSections across load', async () => {
+      await svc.update({ statusPanelSections: { summary: true, generatedFiles: true } });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().statusPanelSections).toEqual({ summary: true, generatedFiles: true });
+    });
+
+    it('persists sidebarHidden across load', async () => {
+      await svc.update({ sidebarHidden: true });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().sidebarHidden).toBe(true);
     });
 
     it('rejects unknown settings keys', async () => {

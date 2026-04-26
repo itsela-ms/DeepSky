@@ -21,14 +21,15 @@
   </div>
 
   <!-- Toast container -->
-  <div id="toast-container"></div>
+  <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+  <div id="notification-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
   <div id="app">
     <!-- Sidebar -->
       <aside id="sidebar">
         <div id="sidebar-header">
           <div id="search-wrapper">
-            <button id="sidebar-search-toggle" class="sidebar-icon-btn" title="Search sessions (Ctrl+F)">🔍</button>
+            <button id="sidebar-search-toggle" class="sidebar-icon-btn" title="Search sessions">🔍</button>
             <input type="text" id="search" placeholder="Search sessions, tags & content..." autocomplete="off" spellcheck="false">
             <button id="search-clear" class="search-clear hidden" title="Clear search (Esc)">✕</button>
           </div>
@@ -109,11 +110,11 @@
   </div>
 
   <!-- Settings modal -->
-  <div id="settings-overlay" class="settings-overlay hidden">
-    <div class="settings-modal">
+  <div id="settings-overlay" class="settings-overlay hidden" aria-hidden="true">
+    <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="settings-modal-header">
-        <h2>Settings</h2>
-        <button class="settings-close">×</button>
+        <h2 id="settings-title">Settings</h2>
+        <button class="settings-close" type="button" aria-label="Close settings">×</button>
       </div>
       <div class="settings-tabs">
         <button class="settings-tab active" data-settings-tab="general">General</button>
@@ -134,13 +135,13 @@
               </div>
               <input type="number" id="max-concurrent" class="settings-number" min="1" max="20" value="5">
             </div>
-            <div class="settings-row">
+            <div class="settings-row" id="agency-launcher-row">
               <div class="settings-row-text">
                 <span class="settings-row-title">Use agency copilot for new sessions</span>
-                <span class="settings-row-desc">Launch new sessions with <code>agency copilot</code> instead of the default Copilot CLI command</span>
+                <span class="settings-row-desc" id="agency-launcher-desc">Launch new sessions with <code>agency copilot</code> instead of the default Copilot CLI command</span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" id="use-agency-copilot">
+                <input type="checkbox" id="use-agency-copilot" aria-describedby="agency-launcher-desc">
                 <span class="toggle-slider"></span>
               </label>
             </div>

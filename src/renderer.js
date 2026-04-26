@@ -5,6 +5,11 @@ const { deriveSessionState } = require('./session-state');
 const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
 const { resolveSidebarDragWidth } = require('./sidebar-resize');
+const { popRestorableClosedSession } = require('./recently-closed');
+const { shouldApplyStatusPanelUpdate } = require('./status-panel-state');
+const { getInitialSidebarState, getNextSidebarVisibilityState } = require('./sidebar-preferences');
+const { processSessionInput, isMetadataRefreshCommand, extractMetadataCommand } = require('./session-input-tracker');
+const { renderDiffPreviewHtml } = require('./status-diff-preview');
 
 // State
 const terminals = new Map();
@@ -27,10 +32,16 @@ let sidebarSearchResultIds = null;
 let sidebarSearchLoading = false;
 let sidebarSearchTimer = null;
 let sidebarSearchRequestSeq = 0;
+let sessionListRenderSeq = 0;
 let sidebarCollapsed = false;
 let sidebarHidden = false;
+let sidebarCollapsedBeforeHidden = false;
 let lastExpandedSidebarWidth = 280;
+let statusPanelRequestSeq = 0;
+let lastFocusedElementBeforeSettings = null;
 const sessionPromptGhostState = new Map();
+let statusDiffPopover = null;
+let statusDiffHideTimer = null;
 
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 450;
@@ -117,15 +128,19 @@ const notificationPanel = document.getElementById('notification-panel');
 const notificationListEl = document.getElementById('notification-list');
 const feedbackPanel = document.getElementById('feedback-panel');
 const toastContainer = document.getElementById('toast-container');
+const notificationLiveRegion = document.getElementById('notification-live-region');
 const autoUpdateToggle = document.getElementById('auto-update-enabled');
 const betaChannelToggle = document.getElementById('beta-channel');
 const betaChannelLabel = document.getElementById('beta-channel-label');
 const betaChannelRow = document.getElementById('beta-channel-row');
+const agencyLauncherRow = document.getElementById('agency-launcher-row');
+const agencyLauncherDesc = document.getElementById('agency-launcher-desc');
 
 const titlebar = document.getElementById('titlebar');
 const NOTIF_ICONS = { 'task-done': '✓', 'needs-input': '◌', 'error': '!', 'info': '·' };
 
 const OVERLAY_BASE_PX = 140;
+const DEFAULT_AGENCY_LAUNCHER_TEXT = 'Launch new sessions with agency copilot instead of the default Copilot CLI command';
 async function syncTitlebarPadding() {
   const zoom = await window.api.getZoom();
   titlebar.style.paddingRight = `${Math.ceil(OVERLAY_BASE_PX / zoom)}px`;
@@ -134,6 +149,57 @@ syncTitlebarPadding();
 
 let sessionSearchMatches = [];
 let sessionSearchIndex = -1;
+
+function announceLiveMessage(message) {
+  if (!notificationLiveRegion) return;
+  notificationLiveRegion.textContent = '';
+  setTimeout(() => {
+    notificationLiveRegion.textContent = message;
+  }, 0);
+}
+
+function getFocusableElements(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter((el) => !el.closest('.hidden') && el.offsetParent !== null);
+}
+
+function updateAgencyAvailabilityState(agencyAvailable, requestedValue = false) {
+  const available = agencyAvailable !== false;
+  useAgencyCopilotInput.disabled = !available;
+  useAgencyCopilotInput.checked = available && !!requestedValue;
+  if (agencyLauncherRow) {
+    agencyLauncherRow.classList.toggle('disabled', !available);
+  }
+  if (agencyLauncherDesc) {
+    agencyLauncherDesc.textContent = available
+      ? DEFAULT_AGENCY_LAUNCHER_TEXT
+      : 'Agency is not installed on this machine, so DeepSky will keep using the default Copilot CLI command.';
+  }
+}
+
+function applySettingsToControls(settings, { includeSidebar = false } = {}) {
+  window._cachedSettings = { ...(window._cachedSettings || {}), ...settings };
+  maxConcurrentInput.value = settings.maxConcurrent;
+  promptWorkdirInput.checked = !!settings.promptForWorkdir;
+  defaultWorkdirInput.value = settings.defaultWorkdir || '';
+  autoUpdateToggle.checked = settings.autoUpdateEnabled !== false;
+  betaChannelToggle.checked = settings.updateChannel === 'beta';
+  betaChannelRow.classList.toggle('disabled', !autoUpdateToggle.checked);
+  betaChannelToggle.disabled = !autoUpdateToggle.checked;
+  updateAgencyAvailabilityState(settings.agencyAvailable, settings.useAgencyCopilot);
+  applyTheme(settings.theme || 'mocha');
+
+  if (includeSidebar) {
+    const sidebarState = getInitialSidebarState(settings);
+    lastExpandedSidebarWidth = sidebarState.lastExpandedSidebarWidth;
+    sidebarCollapsed = sidebarState.sidebarCollapsed;
+    sidebarHidden = sidebarState.sidebarHidden;
+    sidebarCollapsedBeforeHidden = sidebarState.sidebarCollapsed;
+    syncSidebarCollapsedUi();
+  }
+}
 
 function getActiveTerminalEntry() {
   return activeSessionId ? terminals.get(activeSessionId) : null;
@@ -302,7 +368,8 @@ function getSessionPromptGhost(sessionId) {
     sessionPromptGhostState.set(sessionId, {
       lastPrompt: '',
       isTyping: false,
-      requestSeq: 0
+      requestSeq: 0,
+      pendingCommandLine: ''
     });
   }
   return sessionPromptGhostState.get(sessionId);
@@ -335,6 +402,14 @@ function updateSessionPromptGhost(sessionId) {
   terminalPromptGhost.classList.remove('empty');
 }
 
+function scheduleSessionMetadataRefresh(sessionId, delays = [500, 1500, 4000]) {
+  for (const delay of delays) {
+    setTimeout(() => {
+      if (terminals.has(sessionId)) refreshSessionList();
+    }, delay);
+  }
+}
+
 function scheduleSessionPromptGhostRefresh(sessionId, delays = [0, 400, 1200]) {
   const state = getSessionPromptGhost(sessionId);
   const requestId = ++state.requestSeq;
@@ -358,6 +433,32 @@ function scheduleSessionPromptGhostRefresh(sessionId, delays = [0, 400, 1200]) {
 function handleSessionPromptInput(sessionId, data) {
   const state = getSessionPromptGhost(sessionId);
   if (!data) return;
+
+  const nextCommandState = processSessionInput({ line: state.pendingCommandLine }, data, (command) => {
+    if (isMetadataRefreshCommand(command)) {
+      const metadataCommand = extractMetadataCommand(command);
+      if (metadataCommand?.type === 'cwd') {
+        window.api.updateSessionCwdMetadata(sessionId, metadataCommand.value)
+          .then(() => {
+            const session = allSessions.find(s => s.id === sessionId);
+            if (session) session.cwd = metadataCommand.value;
+            scheduleRenderSessionList();
+            if (sessionId === activeSessionId) {
+              updateStatusPanel(sessionId);
+            }
+          })
+          .catch(() => {
+            showToast({
+              type: 'error',
+              title: 'Could not update working directory',
+              body: metadataCommand.value,
+            });
+          });
+      }
+      scheduleSessionMetadataRefresh(sessionId);
+    }
+  });
+  state.pendingCommandLine = nextCommandState.line;
 
   if (data.includes('\r') || data.includes('\n')) {
     state.isTyping = false;
@@ -440,6 +541,7 @@ function setSidebarCollapsed(collapsed, { persist = true } = {}) {
   }
 
   sidebarCollapsed = collapsed;
+  if (!sidebarHidden) sidebarCollapsedBeforeHidden = collapsed;
   syncSidebarCollapsedUi();
 
   if (window._cachedSettings) {
@@ -452,6 +554,31 @@ function setSidebarCollapsed(collapsed, { persist = true } = {}) {
   fitActiveTerminal();
 }
 
+function setSidebarHidden(hidden, { persist = true } = {}) {
+  const nextState = getNextSidebarVisibilityState({
+    sidebarCollapsed,
+    sidebarCollapsedBeforeHidden,
+  }, hidden);
+  sidebarHidden = nextState.sidebarHidden;
+  sidebarCollapsed = nextState.sidebarCollapsed;
+  sidebarCollapsedBeforeHidden = nextState.sidebarCollapsedBeforeHidden;
+  syncSidebarCollapsedUi();
+
+  if (window._cachedSettings) {
+    window._cachedSettings.sidebarHidden = sidebarHidden;
+    window._cachedSettings.sidebarCollapsed = sidebarCollapsed;
+  }
+
+  if (persist) {
+    window.api.updateSettings({
+      sidebarHidden,
+      sidebarCollapsed,
+    });
+  }
+  renderSessionList();
+  fitActiveTerminal();
+}
+
 function persistSidebarWidth(width) {
   lastExpandedSidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width));
   if (window._cachedSettings) window._cachedSettings.sidebarWidth = lastExpandedSidebarWidth;
@@ -459,8 +586,9 @@ function persistSidebarWidth(width) {
 }
 
 function focusSidebarSearch() {
+  if (sidebarHidden) setSidebarHidden(false);
   if (sidebarCollapsed) setSidebarCollapsed(false);
-  queueAfterNextPaint(() => {
+  requestAnimationFrame(() => {
     searchInput.focus();
     searchInput.select();
     document.getElementById('search-wrapper').classList.add('search-active');
@@ -553,20 +681,7 @@ sessionList.addEventListener('keydown', (e) => {
 // Initialize
 async function init() {
   const settings = await window.api.getSettings();
-  window._cachedSettings = settings;
-  maxConcurrentInput.value = settings.maxConcurrent;
-  useAgencyCopilotInput.checked = !!settings.useAgencyCopilot;
-  promptWorkdirInput.checked = !!settings.promptForWorkdir;
-  defaultWorkdirInput.value = settings.defaultWorkdir || '';
-  autoUpdateToggle.checked = settings.autoUpdateEnabled !== false;
-  betaChannelToggle.checked = settings.updateChannel === 'beta';
-  betaChannelRow.classList.toggle('disabled', !autoUpdateToggle.checked);
-  betaChannelToggle.disabled = !autoUpdateToggle.checked;
-  lastExpandedSidebarWidth = settings.sidebarWidth || 280;
-  sidebarHidden = !!settings.sidebarCollapsed;
-  sidebarCollapsed = false;
-  syncSidebarCollapsedUi();
-  applyTheme(settings.theme || 'mocha');
+  applySettingsToControls(settings, { includeSidebar: true });
 
   // Restore last sidebar tab — must be set BEFORE refreshSessionList
   if (settings.lastActiveTab) {
@@ -684,12 +799,32 @@ async function init() {
   });
 
   // Settings modal
-  btnSettings.addEventListener('click', openSettings);
+  btnSettings.addEventListener('click', () => { void openSettings(); });
 
   // Home link — deselect active session
   document.getElementById('titlebar-home').addEventListener('click', showHome);
   settingsOverlay.querySelector('.settings-close').addEventListener('click', closeSettings);
   settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
+  settingsOverlay.addEventListener('keydown', (e) => {
+    if (settingsOverlay.classList.contains('hidden')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSettings();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusable = getFocusableElements(settingsOverlay);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
 
   // Update status listener (auto-update only, no manual button)
   ipcCleanups.push(window.api.onUpdateStatus(handleUpdateStatus));
@@ -724,6 +859,20 @@ async function init() {
     } catch {
       showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
     }
+  });
+  statusPanelBody.addEventListener('mouseover', (event) => {
+    const fileItem = event.target.closest('.status-file-item[data-diff]');
+    if (!fileItem || !statusPanelBody.contains(fileItem)) return;
+    const diff = decodeURIComponent(fileItem.dataset.diff || '');
+    if (!diff) return;
+    showStatusDiffPopover(fileItem, diff);
+  });
+  statusPanelBody.addEventListener('mouseout', (event) => {
+    const fileItem = event.target.closest('.status-file-item[data-diff]');
+    if (!fileItem) return;
+    const next = event.relatedTarget;
+    if (fileItem.contains(next) || statusDiffPopover?.contains(next)) return;
+    scheduleHideStatusDiffPopover();
   });
 
   // Tab scroll buttons
@@ -824,9 +973,16 @@ function applyTheme(theme) {
   settingsOverlay.querySelectorAll('.theme-option').forEach(b => b.classList.toggle('active', b.dataset.theme === theme));
 }
 
-function openSettings() {
+async function openSettings() {
+  lastFocusedElementBeforeSettings = document.activeElement;
+  const settings = await window.api.getSettings();
+  applySettingsToControls(settings);
   settingsOverlay.classList.remove('hidden');
+  settingsOverlay.setAttribute('aria-hidden', 'false');
   populateAboutSection();
+  requestAnimationFrame(() => {
+    (settingsOverlay.querySelector('.settings-tab.active') || settingsOverlay.querySelector('.settings-close'))?.focus();
+  });
 }
 
 // Settings tab switching
@@ -916,6 +1072,70 @@ function setUpdateBadge(show, version, notify) {
 
 function closeSettings() {
   settingsOverlay.classList.add('hidden');
+  settingsOverlay.setAttribute('aria-hidden', 'true');
+  lastFocusedElementBeforeSettings?.focus?.();
+  lastFocusedElementBeforeSettings = null;
+}
+
+function ensureStatusDiffPopover() {
+  if (statusDiffPopover) return statusDiffPopover;
+  statusDiffPopover = document.createElement('div');
+  statusDiffPopover.className = 'status-diff-popover hidden';
+  statusDiffPopover.addEventListener('mouseenter', () => {
+    if (statusDiffHideTimer) {
+      clearTimeout(statusDiffHideTimer);
+      statusDiffHideTimer = null;
+    }
+  });
+  statusDiffPopover.addEventListener('mouseleave', () => {
+    scheduleHideStatusDiffPopover();
+  });
+  document.body.appendChild(statusDiffPopover);
+  return statusDiffPopover;
+}
+
+function scheduleHideStatusDiffPopover() {
+  if (statusDiffHideTimer) clearTimeout(statusDiffHideTimer);
+  statusDiffHideTimer = setTimeout(() => {
+    statusDiffPopover?.classList.add('hidden');
+    statusDiffHideTimer = null;
+  }, 120);
+}
+
+function hideStatusDiffPopover() {
+  if (statusDiffHideTimer) {
+    clearTimeout(statusDiffHideTimer);
+    statusDiffHideTimer = null;
+  }
+  statusDiffPopover?.classList.add('hidden');
+}
+
+function showStatusDiffPopover(anchorEl, diffText) {
+  if (!anchorEl || !diffText) return;
+  const popover = ensureStatusDiffPopover();
+  if (statusDiffHideTimer) {
+    clearTimeout(statusDiffHideTimer);
+    statusDiffHideTimer = null;
+  }
+
+  popover.innerHTML = `
+    <div class="status-diff-popover-header">Git diff preview</div>
+    <div class="status-diff-popover-body">${renderDiffPreviewHtml(diffText)}</div>
+  `;
+  popover.classList.remove('hidden');
+
+  const rect = anchorEl.getBoundingClientRect();
+  const popRect = popover.getBoundingClientRect();
+  let left = rect.right + 12;
+  if (left + popRect.width > window.innerWidth - 12) {
+    left = Math.max(12, rect.left - popRect.width - 12);
+  }
+  let top = rect.top;
+  if (top + popRect.height > window.innerHeight - 12) {
+    top = Math.max(12, window.innerHeight - popRect.height - 12);
+  }
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
 }
 
 async function refreshSessionList() {
@@ -933,6 +1153,7 @@ async function refreshSessionList() {
   await updateSessionBusyStates();
   if (searchQuery) queueSidebarSearch(searchQuery);
   scheduleRenderSessionList();
+  updateSessionPromptGhost(activeSessionId);
   if (!activeSessionId) emptyState.classList.remove('hidden');
 }
 
@@ -1006,7 +1227,11 @@ function patchSessionStateBadges() {
 }
 
 async function pollSessionStatus() {
-  await updateSessionBusyStates();
+  if (terminals.size > 0) {
+    await refreshSessionList();
+  } else {
+    await updateSessionBusyStates();
+  }
   patchSessionStateBadges();
 }
 
@@ -1142,6 +1367,7 @@ function createSessionItem(session, group, index) {
 }
 
 function renderSessionList() {
+  const renderSeq = ++sessionListRenderSeq;
   const activeIds = new Set([...terminals.keys()]);
 
   let displayed;
@@ -1278,6 +1504,7 @@ function renderSessionList() {
   }
 
   window.api.getNotifications().then(notifications => {
+    if (renderSeq !== sessionListRenderSeq) return;
     sessionList.querySelectorAll('.session-item').forEach(el => {
       const sessionId = el.dataset.sessionId;
       if (!sessionId) return;
@@ -1287,7 +1514,10 @@ function renderSessionList() {
         badge.className = 'session-notification-badge';
         badge.textContent = unread;
         const titleEl = el.querySelector('.session-title');
-        if (titleEl) titleEl.appendChild(badge);
+        if (titleEl) {
+          titleEl.querySelector('.session-notification-badge')?.remove();
+          titleEl.appendChild(badge);
+        }
       }
     });
   });
@@ -1348,11 +1578,29 @@ async function handleCwdClick(sessionId) {
       try {
         await window.api.changeCwd(sessionId, picked);
         sessionAliveState.add(sessionId);
+      } catch (error) {
+        showToast({
+          type: 'error',
+          title: 'Could not change working directory',
+          body: error?.message || picked,
+        });
+        await refreshSessionList();
+        return;
       } finally {
         cwdChangingSessions.delete(sessionId);
       }
     } else {
-      await window.api.changeCwd(sessionId, picked);
+      try {
+        await window.api.changeCwd(sessionId, picked);
+      } catch (error) {
+        showToast({
+          type: 'error',
+          title: 'Could not change working directory',
+          body: error?.message || picked,
+        });
+        await refreshSessionList();
+        return;
+      }
     }
 
     // Update local state
@@ -1386,7 +1634,7 @@ function confirmDeleteSession(sessionId, title) {
     cleanup();
     // Close tab if open
     if (terminals.has(sessionId)) {
-      await closeTab(sessionId);
+      await closeTab(sessionId, { remember: false });
     }
     await window.api.deleteSession(sessionId);
     await refreshSessionList();
@@ -1672,11 +1920,11 @@ function updateTabScrollButtons() {
   tabScrollRight.classList.toggle('visible', overflows && el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
 }
 
-async function closeTab(sessionId) {
+async function closeTab(sessionId, { remember = true } = {}) {
   await window.api.killSession(sessionId);
 
   // Remember for Ctrl+Shift+T restore
-  recentlyClosedSessions.push(sessionId);
+  if (remember) recentlyClosedSessions.push(sessionId);
 
   const entry = terminals.get(sessionId);
   if (entry) {
@@ -2110,10 +2358,12 @@ let statusSectionState = {};
 function loadStatusSectionState() {
   try {
     const settings = window._cachedSettings || {};
+    const savedSections = settings.statusPanelSections || {};
     statusSectionState = settings.statusPanelSections || {
       summary: true, nextSteps: false, prs: false, workitems: false,
-      files: false, pipelines: false, timeline: false
+      files: false, generatedFiles: false, pipelines: false, timeline: false
     };
+    statusSectionState.generatedFiles = savedSections.generatedFiles ?? savedSections.reportsGenerated ?? statusSectionState.generatedFiles;
   } catch { /* defaults above */ }
 }
 
@@ -2124,6 +2374,7 @@ function saveStatusSectionState() {
 function toggleStatusSection(sectionKey, el) {
   const expanded = el.classList.toggle('expanded');
   statusSectionState[sectionKey] = expanded;
+  el.querySelector('.status-section-header')?.setAttribute('aria-expanded', String(expanded));
   saveStatusSectionState();
 }
 
@@ -2131,12 +2382,12 @@ function renderStatusSection(key, icon, title, badge, contentHtml) {
   if (!contentHtml) return '';
   const expanded = statusSectionState[key] ? 'expanded' : '';
   return `<div class="status-section ${expanded}" data-section="${key}">
-    <div class="status-section-header">
+    <button class="status-section-header" type="button" aria-expanded="${statusSectionState[key] ? 'true' : 'false'}">
       <span class="status-section-icon">${icon}</span>
       <span class="status-section-title">${escapeHtml(title)}</span>
       ${badge ? `<span class="status-section-badge">${escapeHtml(String(badge))}</span>` : ''}
       <span class="status-section-chevron">▶</span>
-    </div>
+    </button>
     <div class="status-section-content">${contentHtml}</div>
   </div>
   <div class="status-divider"></div>`;
@@ -2184,10 +2435,12 @@ function renderResourceItems(resources) {
 }
 
 async function updateStatusPanel(sessionId) {
+  const requestId = ++statusPanelRequestSeq;
   if (statusPanel.classList.contains('collapsed')) return;
   loadStatusSectionState();
 
   if (!sessionId) {
+    hideStatusDiffPopover();
     statusPanelBody.innerHTML = '<div class="status-empty">Open a session to see its status</div>';
     return;
   }
@@ -2197,9 +2450,18 @@ async function updateStatusPanel(sessionId) {
     window.api.getSessionStatus(sessionId).catch(() => null),
     Promise.resolve(allSessions.find(s => s.id === sessionId)),
   ]);
+  if (!shouldApplyStatusPanelUpdate({
+    requestId,
+    currentRequestId: statusPanelRequestSeq,
+    requestedSessionId: sessionId,
+    activeSessionId,
+    panelCollapsed: statusPanel.classList.contains('collapsed'),
+  })) {
+    return;
+  }
 
   const resources = session?.resources || [];
-  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], timeline: [] };
+  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], generatedFiles: [], timeline: [] };
 
   let html = '';
 
@@ -2257,13 +2519,32 @@ async function updateStatusPanel(sessionId) {
   // Files changed
   if (status.files.length > 0) {
     const filesHtml = status.files.map(f => {
-      const badgeCls = f.action === 'A' ? 'status-file-added' : 'status-file-modified';
-      return `<div class="status-file-item">
+      const badgeCls =
+        f.action === 'A' ? 'status-file-added' :
+        f.action === 'D' ? 'status-file-deleted' :
+        f.action === 'R' ? 'status-file-renamed' :
+        'status-file-modified';
+      const diffData = f.diff ? ` data-diff="${escapeHtml(encodeURIComponent(f.diff))}"` : '';
+      return `<div class="status-file-item${f.diff ? ' status-file-item-hoverable' : ''}"${diffData}>
         <span class="status-file-badge ${badgeCls}">${f.action}</span>
         <span class="status-file-path">${escapeHtml(f.path)}</span>
       </div>`;
     }).join('');
     html += renderStatusSection('files', '📂', 'Files Changed', status.files.length, filesHtml);
+  }
+
+  if (status.generatedFiles.length > 0) {
+    const generatedFilesHtml = status.generatedFiles.map((file) => {
+      const badge = file.ext ? file.ext.toUpperCase().slice(0, 5) : 'FILE';
+      return `<div class="status-generated-file-item" data-session-id="${escapeHtml(sessionId)}" data-relative-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">
+        <span class="status-generated-file-badge">${escapeHtml(badge)}</span>
+        <div class="status-generated-file-details">
+          <div class="status-generated-file-name">${escapeHtml(file.name)}</div>
+          <div class="status-generated-file-path">${escapeHtml(file.path)}</div>
+        </div>
+      </div>`;
+    }).join('');
+    html += renderStatusSection('generatedFiles', '📄', 'Reports Generated', status.generatedFiles.length, generatedFilesHtml);
   }
 
   // Pipelines, releases, repos, wikis, links
@@ -2295,6 +2576,7 @@ async function updateStatusPanel(sessionId) {
     html = '<div class="status-empty">No status data yet for this session</div>';
   }
 
+  hideStatusDiffPopover();
   statusPanelBody.innerHTML = html;
 
   // Wire section expand/collapse
@@ -2311,6 +2593,23 @@ async function updateStatusPanel(sessionId) {
     item.addEventListener('click', () => {
       const url = item.dataset.url;
       if (url && url !== '#') window.api.openExternal(url);
+    });
+  });
+
+  statusPanelBody.querySelectorAll('.status-generated-file-item').forEach(item => {
+    item.addEventListener('click', async () => {
+      const targetSessionId = item.dataset.sessionId;
+      const relativePath = item.dataset.relativePath;
+      if (!targetSessionId || !relativePath) return;
+
+      const result = await window.api.openGeneratedFile(targetSessionId, relativePath);
+      if (!result?.ok) {
+        showToast({
+          type: 'error',
+          title: 'Could not open generated file',
+          body: result?.error || relativePath,
+        });
+      }
     });
   });
 }
@@ -2663,10 +2962,7 @@ document.addEventListener('mousemove', (e) => {
   if (!resizeDidDrag) return;
   // Un-hide on drag
   if (sidebarHidden) {
-    sidebarHidden = false;
-    sidebarCollapsed = false;
-    syncSidebarCollapsedUi();
-    renderSessionList();
+    setSidebarHidden(false, { persist: false });
   }
 
   const nextSidebarState = resolveSidebarDragWidth(e.clientX, {
@@ -2694,21 +2990,18 @@ document.addEventListener('mouseup', () => {
 
     if (!resizeDidDrag) {
       // Click → toggle full hide
-      sidebarHidden = !sidebarHidden;
-      if (sidebarHidden) sidebarCollapsed = false;
-      syncSidebarCollapsedUi();
-      if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = sidebarHidden;
-      window.api.updateSettings({ sidebarCollapsed: sidebarHidden });
-      renderSessionList();
+      setSidebarHidden(!sidebarHidden);
     } else {
       const width = parseInt(sidebar.style.width, 10);
       if (sidebarCollapsed) {
         if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = false;
-        window.api.updateSettings({ sidebarCollapsed: false });
+        if (window._cachedSettings) window._cachedSettings.sidebarHidden = false;
+        window.api.updateSettings({ sidebarCollapsed: false, sidebarHidden: false });
       } else if (width) {
         persistSidebarWidth(width);
         if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = false;
-        window.api.updateSettings({ sidebarCollapsed: false });
+        if (window._cachedSettings) window._cachedSettings.sidebarHidden = false;
+        window.api.updateSettings({ sidebarCollapsed: false, sidebarHidden: false });
       }
     }
 
@@ -2848,9 +3141,13 @@ async function refreshNotifications() {
   if (unread > 0) {
     notificationBadge.textContent = unread > 99 ? '99+' : unread;
     notificationBadge.classList.remove('hidden');
+    notificationBadge.setAttribute('aria-label', `${unread} unread notification${unread === 1 ? '' : 's'}`);
+    notificationBadge.setAttribute('aria-hidden', 'false');
   } else {
     notificationBadge.classList.add('hidden');
+    notificationBadge.setAttribute('aria-hidden', 'true');
   }
+  announceLiveMessage(unread > 0 ? `${unread} unread notification${unread === 1 ? '' : 's'}.` : 'All notifications read.');
 
   // Update dropdown list
   if (notifications.length === 0) {
@@ -2928,6 +3225,7 @@ function showToast(notification) {
   });
 
   toastContainer.appendChild(toast);
+  announceLiveMessage([notification.title, notification.body].filter(Boolean).join('. '));
 
   // Auto-dismiss after 6 seconds
   setTimeout(() => {
@@ -2995,7 +3293,8 @@ document.addEventListener('keydown', (e) => {
   // Ctrl/Cmd+Shift+T: Restore last closed tab
   if (mod && e.shiftKey && e.key === 'T') {
     e.preventDefault();
-    const sessionId = recentlyClosedSessions.pop();
+    const validIds = new Set([...allSessions.map(session => session.id), ...terminals.keys()]);
+    const sessionId = popRestorableClosedSession(recentlyClosedSessions, validIds);
     if (sessionId) openSession(sessionId);
   }
 
