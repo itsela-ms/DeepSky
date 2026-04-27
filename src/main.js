@@ -11,6 +11,7 @@ const StatusService = require('./status-service');
 const SettingsService = require('./settings-service');
 const NotificationService = require('./notification-service');
 const UpdateService = require('./update-service');
+const { resolveGeneratedFilePath, resolveSessionDirectory } = require('./session-paths');
 const {
   calculateNotificationPosition,
   isValidSessionId,
@@ -543,40 +544,24 @@ if (!hasSingleInstanceLock) {
     return statusService.getSessionStatus(sessionId);
   });
 
-  ipcMain.handle('session:openGeneratedFile', async (event, sessionId, relativePath) => {
-    if (!isValidSessionId(sessionId) || typeof relativePath !== 'string' || !relativePath.trim()) {
-      return { ok: false, error: 'Invalid generated file request.' };
-    }
-
-    const sessionDir = path.resolve(SESSION_STATE_DIR, sessionId);
-    const targetPath = path.resolve(sessionDir, relativePath);
-    const filesRoot = path.resolve(sessionDir, 'files');
-    if (!targetPath.startsWith(filesRoot + path.sep) && targetPath !== filesRoot) {
-      return { ok: false, error: 'Generated file must be inside the session files folder.' };
-    }
-
-    let targetRealPath;
+  ipcMain.handle('session:openDirectory', async (event, sessionId) => {
     try {
-      const [filesRootRealPath, targetRealPath, targetStat] = await Promise.all([
-        fs.promises.realpath(filesRoot),
-        fs.promises.realpath(targetPath),
-        fs.promises.lstat(targetPath),
-      ]);
-      const validatedRealPath = targetRealPath;
-      if (
-        (!validatedRealPath.startsWith(filesRootRealPath + path.sep) && validatedRealPath !== filesRootRealPath) ||
-        targetStat.isSymbolicLink() ||
-        !targetStat.isFile()
-      ) {
-        return { ok: false, error: 'Generated file no longer exists.' };
-      }
-      targetRealPath = validatedRealPath;
-    } catch {
-      return { ok: false, error: 'Generated file no longer exists.' };
+      const sessionDir = await resolveSessionDirectory(SESSION_STATE_DIR, sessionId);
+      const error = await shell.openPath(sessionDir);
+      return error ? { ok: false, error } : { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message || 'Session directory no longer exists.' };
     }
+  });
 
-    const error = await shell.openPath(targetRealPath);
-    return error ? { ok: false, error } : { ok: true };
+  ipcMain.handle('session:openGeneratedFile', async (event, sessionId, relativePath) => {
+    try {
+      const targetRealPath = await resolveGeneratedFilePath(SESSION_STATE_DIR, sessionId, relativePath);
+      const error = await shell.openPath(targetRealPath);
+      return error ? { ok: false, error } : { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message || 'Generated file no longer exists.' };
+    }
   });
 
   // Forward pty output to renderer — batch at 16ms intervals to prevent IPC flooding

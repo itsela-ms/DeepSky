@@ -2449,27 +2449,34 @@ body {
   font-size: 11px;
   line-height: 1.45;
   color: var(--text);
-  background: color-mix(in srgb, var(--surface-1) 86%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 86%, transparent);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 5px 7px;
   word-break: break-all;
   white-space: normal;
 }
-.status-copy-session-id {
+.status-summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.status-summary-action {
   border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-1) 82%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 82%, transparent);
   color: var(--text-dim);
   border-radius: 6px;
   font-size: 10px;
   line-height: 1;
   padding: 6px 8px;
   min-height: 28px;
+  cursor: pointer;
 }
-.status-copy-session-id:hover {
+.status-summary-action:hover {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface-1));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
 }
 
 /* Next steps */

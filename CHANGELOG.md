@@ -2,6 +2,14 @@
 
 All notable changes to DeepSky are documented here.
 
+## [1.0.1-beta.1] - 2026-04-27
+
+### Added
+- **Open session directory action** — the Session Status summary now includes an **Open Folder** button so you can jump straight to the current session's directory from the status panel
+
+### Changed
+- **Shared session path validation** — session-directory opening and generated-file opening now use the same main-process path validation helpers instead of separate ad-hoc checks
+
 ## [1.0.0] - 2026-04-26
 
 ### Added

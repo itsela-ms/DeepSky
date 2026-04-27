@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   addResource: (sessionId, url) => ipcRenderer.invoke('resource:add', sessionId, url),
   removeResource: (sessionId, key) => ipcRenderer.invoke('resource:remove', sessionId, key),
   getSessionStatus: (sessionId) => ipcRenderer.invoke('session:getStatus', sessionId),
+  openSessionDirectory: (sessionId) => ipcRenderer.invoke('session:openDirectory', sessionId),
   openGeneratedFile: (sessionId, relativePath) => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath),
   openSession: (sessionId) => ipcRenderer.invoke('session:open', sessionId),
   newSession: (cwd) => ipcRenderer.invoke('session:new', cwd),

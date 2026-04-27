@@ -848,16 +848,32 @@ async function init() {
   });
   statusPanelBody.addEventListener('click', async (event) => {
     const copyButton = event.target.closest('.status-copy-session-id');
-    if (!copyButton) return;
+    if (copyButton) {
+      const sessionId = copyButton.dataset.sessionId;
+      if (!sessionId) return;
 
-    const sessionId = copyButton.dataset.sessionId;
-    if (!sessionId) return;
+      try {
+        await window.api.copyText(sessionId);
+        showToast({ type: 'success', title: 'Session ID copied', body: sessionId });
+      } catch {
+        showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
+      }
+      return;
+    }
 
-    try {
-      await window.api.copyText(sessionId);
-      showToast({ type: 'success', title: 'Session ID copied', body: sessionId });
-    } catch {
-      showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
+    const openDirectoryButton = event.target.closest('.status-open-session-directory');
+    if (openDirectoryButton) {
+      const sessionId = openDirectoryButton.dataset.sessionId;
+      if (!sessionId) return;
+
+      const result = await window.api.openSessionDirectory(sessionId);
+      if (!result?.ok) {
+        showToast({
+          type: 'error',
+          title: 'Could not open session directory',
+          body: result?.error || sessionId,
+        });
+      }
     }
   });
   statusPanelBody.addEventListener('mouseover', (event) => {
@@ -2482,7 +2498,10 @@ async function updateStatusPanel(sessionId) {
         <span class="status-summary-id-label">🆔 Session ID</span>
         <code>${escapeHtml(sessionId)}</code>
       </span>
-      <button class="status-copy-session-id" type="button" data-session-id="${escapeHtml(sessionId)}" title="Copy session ID">Copy</button>
+      <div class="status-summary-actions">
+        <button class="status-summary-action status-open-session-directory" type="button" data-session-id="${escapeHtml(sessionId)}" title="Open session directory">Open Folder</button>
+        <button class="status-summary-action status-copy-session-id" type="button" data-session-id="${escapeHtml(sessionId)}" title="Copy session ID">Copy</button>
+      </div>
     </div>`;
   html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
 
