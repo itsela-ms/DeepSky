@@ -97,6 +97,8 @@
         <div id="instructions-header">
           <h2>Custom Instructions</h2>
           <div id="instructions-actions">
+            <button id="btn-enhance-instructions" class="btn-primary" title="Enhance with the latest context-engineering practices (creates a backup first)">✨ Enhance</button>
+            <button id="btn-review-enhancement" class="btn-secondary hidden" title="Review the proposed enhancement and choose Apply, Discard, or Rollback">Review</button>
             <button id="btn-export-instructions" class="btn-secondary" title="Export to file">Export</button>
             <button id="btn-import-instructions" class="btn-secondary" title="Import from file">Import</button>
             <button id="btn-close-instructions" class="btn-secondary">Close</button>
@@ -104,6 +106,43 @@
         </div>
         <div id="instructions-body">
           <div id="instructions-rendered"></div>
+        </div>
+      </div>
+
+      <!-- Enhance confirm modal -->
+      <div id="enhance-confirm-modal" class="hidden">
+        <div class="enhance-modal-backdrop" aria-hidden="true"></div>
+        <div class="enhance-modal-content" role="dialog" aria-modal="true" aria-labelledby="enhance-confirm-title">
+          <h2 id="enhance-confirm-title">✨ Enhance Instructions</h2>
+          <p>This will:</p>
+          <ol>
+            <li><strong>Create a backup</strong> of your current instructions and playbooks under <code>~/.copilot/instruction-backups/</code></li>
+            <li>Open a <strong>new Copilot session</strong> that researches the latest context-engineering practices and rewrites your instructions</li>
+            <li>Generate an <strong>HTML report</strong> of the changes</li>
+          </ol>
+          <p>When the session finishes, click <strong>Review</strong> to see the diff and choose to keep or roll back.</p>
+          <div class="enhance-modal-actions">
+            <button id="btn-enhance-cancel" class="btn-secondary">Cancel</button>
+            <button id="btn-enhance-confirm" class="btn-primary">Backup &amp; Start</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Review modal -->
+      <div id="review-modal" class="hidden">
+        <div class="enhance-modal-backdrop" aria-hidden="true"></div>
+        <div class="review-modal-content" role="dialog" aria-modal="true" aria-labelledby="review-modal-title">
+          <div class="review-modal-header">
+            <h2 id="review-modal-title">Review Enhancement</h2>
+            <span id="review-modal-timestamp" class="review-modal-meta"></span>
+            <button id="btn-review-close" class="btn-secondary">Close</button>
+          </div>
+          <iframe id="review-modal-iframe" sandbox="allow-scripts" title="Enhancement changes report"></iframe>
+          <div class="review-modal-actions">
+            <button id="btn-review-discard" class="btn-secondary danger hidden">✗ Discard</button>
+            <button id="btn-review-rollback" class="btn-secondary danger hidden">↩ Rollback</button>
+            <button id="btn-review-apply" class="btn-primary hidden">✓ Apply changes</button>
+          </div>
         </div>
       </div>
     </main>

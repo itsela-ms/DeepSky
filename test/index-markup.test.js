@@ -26,4 +26,10 @@ describe('index.html accessibility regressions', () => {
     expect(html).toContain('title="Search sessions"');
     expect(html).not.toContain('Search sessions (Ctrl+F)');
   });
+
+  it('keeps the enhancement review iframe sandboxed away from the parent window', () => {
+    expect(html).toContain('id="review-modal-iframe"');
+    expect(html).toContain('sandbox="allow-scripts"');
+    expect(html).not.toContain('sandbox="allow-same-origin"');
+  });
 });

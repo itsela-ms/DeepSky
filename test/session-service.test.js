@@ -135,6 +135,12 @@ describe('SessionService', () => {
   });
 
   describe('listSessions cwd resolution', () => {
+    it('returns an empty list when the session-state directory does not exist yet', async () => {
+      const missingDir = path.join(tmpDir, 'missing-session-state');
+      const missingSvc = new SessionService(missingDir);
+      await expect(missingSvc.listSessions()).resolves.toEqual([]);
+    });
+
     it('uses .deepsky-cwd override in session listing', async () => {
       await createSession('list-1', 'cwd: /yaml/dir\nsummary: test session', { deepskyCwd: '/override/dir' });
       const sessions = await svc.listSessions();
@@ -263,6 +269,12 @@ describe('SessionService', () => {
   });
 
   describe('searchSessions', () => {
+    it('returns an empty list when the session-state directory does not exist yet', async () => {
+      const missingDir = path.join(tmpDir, 'missing-session-state');
+      const missingSvc = new SessionService(missingDir);
+      await expect(missingSvc.searchSessions('anything')).resolves.toEqual([]);
+    });
+
     it('finds matches in event transcript content', async () => {
       await createSession('search-hit', 'summary: first session', {
         events: [
@@ -337,6 +349,14 @@ describe('SessionService', () => {
 
       const prompt = await svc.getLastUserPrompt('last-prompt');
       expect(prompt).toBe('Second prompt with more detail');
+    });
+  });
+
+  describe('cleanEmptySessions', () => {
+    it('returns zero when the session-state directory does not exist yet', async () => {
+      const missingDir = path.join(tmpDir, 'missing-session-state');
+      const missingSvc = new SessionService(missingDir);
+      await expect(missingSvc.cleanEmptySessions()).resolves.toBe(0);
     });
   });
 });

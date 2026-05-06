@@ -280,6 +280,18 @@ body {
   background: var(--accent-hover);
 }
 
+#btn-new.is-blocked,
+#btn-new-center.is-blocked {
+  background: var(--surface1);
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+
+#btn-new.is-blocked:hover,
+#btn-new-center.is-blocked:hover {
+  background: var(--surface1);
+}
+
 .btn-icon {
   font-size: 14px;
   line-height: 1;
@@ -1397,6 +1409,136 @@ body {
   font-size: 11px;
 }
 
+/* Enhance Instructions — confirm + review modals */
+#enhance-confirm-modal,
+#review-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#enhance-confirm-modal.hidden,
+#review-modal.hidden { display: none; }
+
+.enhance-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.enhance-modal-content {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 90vw;
+  max-width: 520px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+}
+
+.enhance-modal-content h2 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.enhance-modal-content p { margin: 8px 0; font-size: 13px; line-height: 1.5; }
+
+.enhance-modal-content ol {
+  margin: 8px 0 12px 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.enhance-modal-content code {
+  background: var(--bg-overlay);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+}
+
+.enhance-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.review-modal-content {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 90vw;
+  height: 90vh;
+  max-width: 1200px;
+  max-height: 900px;
+  min-height: min(520px, 90vh);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.review-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-modal-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.review-modal-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  flex: 1;
+}
+
+#review-modal-iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: var(--bg-overlay);
+}
+
+.review-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-height: 820px) {
+  .review-modal-content {
+    height: 94vh;
+    min-height: 0;
+  }
+}
+
+.btn-secondary.danger {
+  color: var(--red);
+  border-color: var(--red);
+}
+.btn-secondary.danger:hover {
+  background: rgba(243, 139, 168, 0.1);
+  color: var(--red);
+}
+
 /* Settings modal */
 .settings-overlay {
   position: fixed;
@@ -2415,37 +2557,45 @@ body {
   font-style: italic;
 }
 .status-summary-meta {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-surface) 76%, transparent);
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
-.status-summary-meta span {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.status-summary-id {
+.status-summary-identity,
+.status-summary-actions-block {
   min-width: 0;
   flex: 1;
-  align-items: flex-start !important;
+  display: flex;
   flex-direction: column;
-  gap: 6px !important;
+  gap: 6px;
 }
-.status-summary-id-label {
+.status-summary-actions-block {
+  flex: 0 1 280px;
+}
+.status-summary-id-label,
+.status-summary-actions-label {
   font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  color: var(--text-dim);
 }
-.status-summary-id code {
+.status-summary-id-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+.status-summary-id {
   display: block;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   font-size: 11px;
   line-height: 1.45;
   color: var(--text);
@@ -2456,27 +2606,61 @@ body {
   word-break: break-all;
   white-space: normal;
 }
+.status-summary-id-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-surface) 82%, transparent);
+  color: var(--text-dim);
+  cursor: pointer;
+}
 .status-summary-actions {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
   flex-wrap: wrap;
 }
 .status-summary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-surface) 82%, transparent);
   color: var(--text-dim);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 10px;
   line-height: 1;
-  padding: 6px 8px;
-  min-height: 28px;
+  font-weight: 600;
+  padding: 7px 10px;
+  min-height: 30px;
   cursor: pointer;
+  white-space: nowrap;
+  flex: 1 1 118px;
 }
-.status-summary-action:hover {
+.status-summary-action:hover,
+.status-summary-id-copy:hover {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
+}
+.status-summary-action:focus-visible,
+.status-summary-id-copy:focus-visible {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-surface));
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 0;
+}
+.status-summary-action-icon {
+  font-size: 11px;
+  line-height: 1;
 }
 
 /* Next steps */

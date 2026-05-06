@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 const {
   resolveGeneratedFilePath,
   resolveSessionDirectory,
+  resolveSessionFilesDirectory,
 } = require('../src/session-paths');
 
 describe('session-paths', () => {
@@ -60,6 +61,40 @@ describe('session-paths', () => {
         '376fedd7-eec9-429e-a4b9-5fb252880d42',
         { realpathImpl: realpath, lstatImpl: lstat },
       )).rejects.toThrow('Session directory no longer exists.');
+    });
+  });
+
+  describe('resolveSessionFilesDirectory', () => {
+    it('returns the real files directory path for a valid session id', async () => {
+      const realpath = vi
+        .fn()
+        .mockResolvedValueOnce('C:\\Users\\itsela\\.copilot\\session-state')
+        .mockResolvedValueOnce('C:\\Users\\itsela\\.copilot\\session-state\\376fedd7-eec9-429e-a4b9-5fb252880d42\\files');
+      const lstat = vi.fn(async () => ({
+        isSymbolicLink: () => false,
+        isDirectory: () => true,
+      }));
+      await expect(resolveSessionFilesDirectory(
+        'C:\\Users\\itsela\\.copilot\\session-state',
+        '376fedd7-eec9-429e-a4b9-5fb252880d42',
+        { realpathImpl: realpath, lstatImpl: lstat },
+      )).resolves.toBe('C:\\Users\\itsela\\.copilot\\session-state\\376fedd7-eec9-429e-a4b9-5fb252880d42\\files');
+    });
+
+    it('rejects files directories that resolve outside the session root', async () => {
+      const realpath = vi
+        .fn()
+        .mockResolvedValueOnce('C:\\Users\\itsela\\.copilot\\session-state')
+        .mockResolvedValueOnce('C:\\outside\\files');
+      const lstat = vi.fn(async () => ({
+        isSymbolicLink: () => false,
+        isDirectory: () => true,
+      }));
+      await expect(resolveSessionFilesDirectory(
+        'C:\\Users\\itsela\\.copilot\\session-state',
+        '376fedd7-eec9-429e-a4b9-5fb252880d42',
+        { realpathImpl: realpath, lstatImpl: lstat },
+      )).rejects.toThrow('Invalid session directory.');
     });
   });
 

@@ -34,6 +34,10 @@ function resolveCommandPath({
 }
 
 function resolveCopilotPath(deps = {}) {
+  return resolveCopilotInfo(deps).path;
+}
+
+function resolveCopilotInfo(deps = {}) {
   const { execSync } = deps.execSync ? deps : require('child_process');
   const env = deps.env || process.env;
   return resolveCommandPath({
@@ -46,7 +50,7 @@ function resolveCopilotPath(deps = {}) {
     fallbackCommand: 'copilot',
     execSyncImpl: execSync,
     existsSync: deps.existsSync || fs.existsSync,
-  }).path;
+  });
 }
 
 function resolveAgencyInfo(deps = {}) {
@@ -116,7 +120,8 @@ module.exports = {
   calculateNotificationPosition,
   isValidSessionId,
   pickNotificationDisplay,
-   resolveCommandPath,
+  resolveCommandPath,
   resolveAgencyInfo,
+  resolveCopilotInfo,
   resolveCopilotPath,
 };

@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
   removeResource: (sessionId, key) => ipcRenderer.invoke('resource:remove', sessionId, key),
   getSessionStatus: (sessionId) => ipcRenderer.invoke('session:getStatus', sessionId),
   openSessionDirectory: (sessionId) => ipcRenderer.invoke('session:openDirectory', sessionId),
+  openSessionFilesDirectory: (sessionId) => ipcRenderer.invoke('session:openFilesDirectory', sessionId),
   openGeneratedFile: (sessionId, relativePath) => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath),
   openSession: (sessionId) => ipcRenderer.invoke('session:open', sessionId),
   newSession: (cwd) => ipcRenderer.invoke('session:new', cwd),
@@ -48,6 +49,15 @@ contextBridge.exposeInMainWorld('api', {
   // Instructions
   readInstructions: () => ipcRenderer.invoke('instructions:read'),
   writeInstructions: (content) => ipcRenderer.invoke('instructions:write', content),
+
+  // Enhance instructions (backup-first workflow)
+  enhanceBackup: () => ipcRenderer.invoke('enhance:backup'),
+  enhanceListBackups: () => ipcRenderer.invoke('enhance:listBackups'),
+  enhanceGetBackupHtml: (timestamp) => ipcRenderer.invoke('enhance:getBackupHtml', timestamp),
+  enhanceRollback: (timestamp) => ipcRenderer.invoke('enhance:rollback', timestamp),
+  enhanceApply: (timestamp) => ipcRenderer.invoke('enhance:apply', timestamp),
+  enhanceDiscard: (timestamp) => ipcRenderer.invoke('enhance:discard', timestamp),
+  enhanceStartSession: () => ipcRenderer.invoke('enhance:startSession'),
 
   // Shell
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),

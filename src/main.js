@@ -11,14 +11,16 @@ const StatusService = require('./status-service');
 const SettingsService = require('./settings-service');
 const NotificationService = require('./notification-service');
 const UpdateService = require('./update-service');
-const { resolveGeneratedFilePath, resolveSessionDirectory } = require('./session-paths');
+const { resolveGeneratedFilePath, resolveSessionDirectory, resolveSessionFilesDirectory } = require('./session-paths');
 const {
   calculateNotificationPosition,
   isValidSessionId,
   pickNotificationDisplay,
   resolveAgencyInfo,
+  resolveCopilotInfo,
   resolveCopilotPath,
 } = require('./app-support');
+const { getNewSessionAvailability } = require('./session-state');
 
 // Prevent Chromium GPU compositing artifacts(rectangular patches of wrong shade on dark backgrounds)
 app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -90,15 +92,22 @@ let settingsService;
 let notificationService;
 let statusService;
 let ptyFlushTimer = null;
+let enhanceStartSessionPromise = null;
 
 const COPILOT_PATH = resolveCopilotPath();
 const SESSION_STATE_DIR = path.join(os.homedir(), '.copilot', 'session-state');
 const COPILOT_CONFIG_DIR = path.join(os.homedir(), '.copilot');
 const NOTIFICATIONS_DIR = path.join(COPILOT_CONFIG_DIR, 'notifications');
 const INSTRUCTIONS_PATH = path.join(COPILOT_CONFIG_DIR, 'copilot-instructions.md');
+const INSTRUCTION_BACKUPS_DIR = path.join(COPILOT_CONFIG_DIR, 'instruction-backups');
+const enhanceInstructions = require('./enhance-instructions-service');
 
 function getNewSessionLauncher(settings) {
-  return settings?.useAgencyCopilot && resolveAgencyInfo().found ? 'agency' : 'copilot';
+  return getNewSessionAvailability(getAugmentedSettings(settings)).launcher;
+}
+
+function getNewSessionSupport(settings) {
+  return getNewSessionAvailability(getAugmentedSettings(settings));
 }
 
 function requireValidSessionId(sessionId) {
@@ -109,7 +118,11 @@ function requireValidSessionId(sessionId) {
 }
 
 function getAugmentedSettings(settings) {
-  return { ...settings, agencyAvailable: resolveAgencyInfo().found };
+  return {
+    ...settings,
+    agencyAvailable: resolveAgencyInfo().found,
+    copilotAvailable: resolveCopilotInfo().found,
+  };
 }
 
 function createWindow() {
@@ -164,6 +177,8 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
   settingsService = new SettingsService(COPILOT_CONFIG_DIR);
   await settingsService.load();
+
+  await fs.promises.mkdir(SESSION_STATE_DIR, { recursive: true });
 
   const copilotExe = settingsService.get().copilotPath || COPILOT_PATH;
   sessionService = new SessionService(SESSION_STATE_DIR);
@@ -224,7 +239,12 @@ if (!hasSingleInstanceLock) {
 
   // IPC: Start a new session
   ipcMain.handle('session:new', async (event, cwd) => {
-    const launcher = getNewSessionLauncher(settingsService.get());
+    const sessionSupport = getNewSessionSupport(settingsService.get());
+    if (!sessionSupport.available) {
+      throw new Error(sessionSupport.reason);
+    }
+
+    const launcher = sessionSupport.launcher;
     // Try pre-warmed standby for instant startup
     const claimed = ptyManager.claimStandby(cwd || undefined, launcher);
     if (claimed) {
@@ -375,6 +395,71 @@ if (!hasSingleInstanceLock) {
   // IPC: Write instructions file
   ipcMain.handle('instructions:write', async (event, content) => {
     await fs.promises.writeFile(INSTRUCTIONS_PATH, content, 'utf8');
+  });
+
+  // IPC: Enhance instructions — backup-first contract
+  // Always snapshot current state BEFORE returning. The renderer must wait
+  // for this to succeed before launching the enhancement session.
+  ipcMain.handle('enhance:backup', async () => {
+    return await enhanceInstructions.createBackup();
+  });
+
+  ipcMain.handle('enhance:listBackups', async () => {
+    return await enhanceInstructions.listBackups();
+  });
+
+  ipcMain.handle('enhance:getBackupHtml', async (_event, timestamp) => {
+    return await enhanceInstructions.getBackupHtml(timestamp);
+  });
+
+  ipcMain.handle('enhance:rollback', async (_event, timestamp) => {
+    return await enhanceInstructions.rollback(timestamp);
+  });
+
+  ipcMain.handle('enhance:apply', async (_event, timestamp) => {
+    return await enhanceInstructions.applyProposed(timestamp);
+  });
+
+  ipcMain.handle('enhance:discard', async (_event, timestamp) => {
+    return await enhanceInstructions.discardProposed(timestamp);
+  });
+
+  ipcMain.handle('enhance:startSession', async () => {
+    // ONE atomic flow:
+    //  1. Backup current state (immutable snapshot at instruction-backups/<ts>/)
+    //     and create a paired writable proposal folder (instruction-proposals/<ts>/).
+    //  2. Write the full multi-kb prompt into the proposal folder.
+    //  3. Spawn a NEW Copilot/agency session with `-i "<one-line command>"` baked
+    //     into the spawn arguments. The CLI receives the prompt as a process arg —
+    //     no PTY-write timing, no escape-sequence assumptions.
+    if (enhanceStartSessionPromise) {
+      throw new Error('Instructions enhancement is already starting.');
+    }
+
+    enhanceStartSessionPromise = (async () => {
+      const backup = await enhanceInstructions.createBackup();
+      const { promptFilePath } = await enhanceInstructions.writeEnhancePrompt(backup.backupDir, backup.proposalDir);
+
+      const promptFileForwardSlash = promptFilePath.replace(/\\/g, '/');
+      const oneLineCommand = `Read the file at ${promptFileForwardSlash} and execute the instructions inside it exactly as written.`;
+
+      const sessionSupport = getNewSessionSupport(settingsService.get());
+      if (!sessionSupport.available) {
+        throw new Error(sessionSupport.reason);
+      }
+      const launcher = sessionSupport.launcher;
+      const sessionId = ptyManager.newSession(undefined, launcher, ['-i', oneLineCommand]);
+      await sessionService.saveLauncher(sessionId, launcher);
+      scheduleWarmUp();
+
+      return { sessionId, backup };
+    })();
+
+    try {
+      return await enhanceStartSessionPromise;
+    } finally {
+      enhanceStartSessionPromise = null;
+    }
   });
 
   // IPC: Clipboard (main process owns clipboard — not available in sandboxed preloads)
@@ -554,6 +639,16 @@ if (!hasSingleInstanceLock) {
     }
   });
 
+  ipcMain.handle('session:openFilesDirectory', async (event, sessionId) => {
+    try {
+      const filesDir = await resolveSessionFilesDirectory(SESSION_STATE_DIR, sessionId);
+      const error = await shell.openPath(filesDir);
+      return error ? { ok: false, error } : { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message || 'Session files directory no longer exists.' };
+    }
+  });
+
   ipcMain.handle('session:openGeneratedFile', async (event, sessionId, relativePath) => {
     try {
       const targetRealPath = await resolveGeneratedFilePath(SESSION_STATE_DIR, sessionId, relativePath);
@@ -597,8 +692,10 @@ if (!hasSingleInstanceLock) {
       warmUpTimer = null;
       const settings = settingsService.get();
       if (settings.promptForWorkdir) return;
+      const sessionSupport = getNewSessionSupport(settings);
+      if (!sessionSupport.available) return;
       const cwd = settings.defaultWorkdir || undefined;
-      ptyManager.warmUp(cwd, getNewSessionLauncher(settings));
+      ptyManager.warmUp(cwd, sessionSupport.launcher);
     }, 3000);
   }
   scheduleWarmUp();

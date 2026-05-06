@@ -18,4 +18,48 @@ function deriveSessionState({ isRunning, isActive, hasPR, isHistory, isBusy }) {
   return { label: 'Idle', cls: 'state-idle', tip: 'New session — no activity yet' };
 }
 
-module.exports = { deriveSessionState };
+function getNewSessionAvailability(settings = {}) {
+  const agencyAvailable = settings.agencyAvailable !== false;
+  const copilotAvailable = settings.copilotAvailable !== false;
+  const launcher = settings.useAgencyCopilot && agencyAvailable ? 'agency' : 'copilot';
+
+  if (launcher === 'agency') {
+    return {
+      launcher,
+      available: true,
+      reason: '',
+    };
+  }
+
+  if (copilotAvailable) {
+    return {
+      launcher,
+      available: true,
+      reason: '',
+    };
+  }
+
+  const reason = settings.useAgencyCopilot && !agencyAvailable
+    ? 'New sessions are unavailable because neither GitHub Copilot CLI nor Agency is installed.'
+    : 'New sessions are unavailable because GitHub Copilot CLI is not installed.';
+
+  return {
+    launcher,
+    available: false,
+    reason,
+  };
+}
+
+function filterSessionsForSidebar({ sessions, activeSessionIds, currentSidebarTab }) {
+  if (currentSidebarTab === 'active') {
+    return sessions.filter(session => activeSessionIds.has(session.id));
+  }
+
+  if (currentSidebarTab === 'history') {
+    return sessions.filter(session => !activeSessionIds.has(session.id));
+  }
+
+  return [...sessions];
+}
+
+module.exports = { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar };

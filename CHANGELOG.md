@@ -2,6 +2,17 @@
 
 All notable changes to DeepSky are documented here.
 
+## [1.1.0] - 2026-05-04
+
+### Added
+- **Enhance Instructions skill** — new "✨ Enhance" button in the Custom Instructions panel. Creates a timestamped backup of `~/.copilot/copilot-instructions.md` and `~/.copilot/playbooks/` to `~/.copilot/instruction-backups/<timestamp>/` **before** anything else, then spawns a new Copilot session with a predefined prompt that researches the latest context-engineering / Skills practices and rewrites your instructions. When the agent finishes it produces a `changes.html` report; a "Review" button surfaces the diff in a sandboxed iframe modal with **Keep changes** or **↩ Rollback** actions. Rollback fully restores the snapshot (including removing playbooks added after the backup).
+- **Files Folder quick-action** in the Session Status summary — jump straight to the session's `files/` directory alongside the existing Session Folder action.
+
+### Changed
+- **Generalized session-path resolution** — `session-paths.js` now exposes `resolveSessionPath` and `resolveSessionFilesDirectory` so the new Files Folder action and any future per-session subdirectory openers share the same symlink/path-traversal validation.
+- **Status summary rendering extracted** to `src/status-summary.js` for testability.
+- **Tighter status summary layout** — the Copy ID action now lives as a compact icon inside the Session ID chip, keeping the Session Folder / Files Folder quick actions on a single row.
+
 ## [1.0.1-beta.1] - 2026-04-27
 
 ### Added

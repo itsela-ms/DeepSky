@@ -137,15 +137,16 @@ class PtyManager extends EventEmitter {
     return sessionId;
   }
 
-  newSession(cwd, launcher) {
+  newSession(cwd, launcher, extraArgs = []) {
     const sessionId = this._generateId();
 
     this._evictIfNeeded();
 
     const spawnCwd = cwd || os.homedir();
+    const buildArgs = ['--resume', sessionId, '--yolo', ...extraArgs];
     let ptyProcess;
     try {
-      const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+      const spawnConfig = this._spawnArgs(buildArgs, launcher);
       launcher = spawnConfig.launcher;
       const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
@@ -158,7 +159,7 @@ class PtyManager extends EventEmitter {
     } catch (err) {
       if (cwd && cwd !== os.homedir()) {
         try {
-          const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+          const spawnConfig = this._spawnArgs(buildArgs, launcher);
           launcher = spawnConfig.launcher;
           const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {

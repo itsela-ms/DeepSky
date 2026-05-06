@@ -1,7 +1,7 @@
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
-const { deriveSessionState } = require('./session-state');
+const { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar } = require('./session-state');
 const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
 const { resolveSidebarDragWidth } = require('./sidebar-resize');
@@ -9,7 +9,9 @@ const { popRestorableClosedSession } = require('./recently-closed');
 const { shouldApplyStatusPanelUpdate } = require('./status-panel-state');
 const { getInitialSidebarState, getNextSidebarVisibilityState } = require('./sidebar-preferences');
 const { processSessionInput, isMetadataRefreshCommand, extractMetadataCommand } = require('./session-input-tracker');
+const { trapFocusWithin, isBackdropClickTarget } = require('./modal-utils');
 const { renderDiffPreviewHtml } = require('./status-diff-preview');
+const { renderStatusSummaryMetaHtml } = require('./status-summary');
 
 // State
 const terminals = new Map();
@@ -33,6 +35,8 @@ let sidebarSearchLoading = false;
 let sidebarSearchTimer = null;
 let sidebarSearchRequestSeq = 0;
 let sessionListRenderSeq = 0;
+let activeSessionRenameId = null;
+let pendingSessionListRender = false;
 let sidebarCollapsed = false;
 let sidebarHidden = false;
 let sidebarCollapsedBeforeHidden = false;
@@ -141,6 +145,27 @@ const NOTIF_ICONS = { 'task-done': '✓', 'needs-input': '◌', 'error': '!', 'i
 
 const OVERLAY_BASE_PX = 140;
 const DEFAULT_AGENCY_LAUNCHER_TEXT = 'Launch new sessions with agency copilot instead of the default Copilot CLI command';
+const DEFAULT_NEW_SESSION_TITLE = 'New Session (Ctrl+N)';
+const DEFAULT_NEW_SESSION_CENTER_TITLE = 'New Session (Ctrl+N)';
+
+function updateNewSessionAvailabilityState(settings = {}) {
+  const availability = getNewSessionAvailability(settings);
+  const blocked = !availability.available;
+  const title = blocked ? availability.reason : DEFAULT_NEW_SESSION_TITLE;
+  const centerTitle = blocked ? availability.reason : DEFAULT_NEW_SESSION_CENTER_TITLE;
+
+  for (const button of [btnNew, btnNewCenter]) {
+    if (!button) continue;
+    button.classList.toggle('is-blocked', blocked);
+    button.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+  }
+
+  btnNew.title = title;
+  btnNewCenter.title = centerTitle;
+
+  return availability;
+}
+
 async function syncTitlebarPadding() {
   const zoom = await window.api.getZoom();
   titlebar.style.paddingRight = `${Math.ceil(OVERLAY_BASE_PX / zoom)}px`;
@@ -189,6 +214,7 @@ function applySettingsToControls(settings, { includeSidebar = false } = {}) {
   betaChannelRow.classList.toggle('disabled', !autoUpdateToggle.checked);
   betaChannelToggle.disabled = !autoUpdateToggle.checked;
   updateAgencyAvailabilityState(settings.agencyAvailable, settings.useAgencyCopilot);
+  updateNewSessionAvailabilityState(window._cachedSettings);
   applyTheme(settings.theme || 'mocha');
 
   if (includeSidebar) {
@@ -874,6 +900,23 @@ async function init() {
           body: result?.error || sessionId,
         });
       }
+      return;
+    }
+
+    const openFilesDirectoryButton = event.target.closest('.status-open-session-files-directory');
+    if (openFilesDirectoryButton) {
+      const sessionId = openFilesDirectoryButton.dataset.sessionId;
+      if (!sessionId) return;
+
+      const result = await window.api.openSessionFilesDirectory(sessionId);
+      if (!result?.ok) {
+        showToast({
+          type: 'error',
+          title: 'Could not open files folder',
+          body: result?.error || sessionId,
+        });
+      }
+      return;
     }
   });
   statusPanelBody.addEventListener('mouseover', (event) => {
@@ -1255,10 +1298,18 @@ setInterval(pollSessionStatus, STATUS_POLL_MS);
 
 let _renderScheduled = false;
 function scheduleRenderSessionList() {
+  if (activeSessionRenameId) {
+    pendingSessionListRender = true;
+    return;
+  }
   if (_renderScheduled) return;
   _renderScheduled = true;
   requestAnimationFrame(() => {
     _renderScheduled = false;
+    if (activeSessionRenameId) {
+      pendingSessionListRender = true;
+      return;
+    }
     renderSessionList();
   });
 }
@@ -1383,26 +1434,36 @@ function createSessionItem(session, group, index) {
 }
 
 function renderSessionList() {
+  if (activeSessionRenameId) {
+    pendingSessionListRender = true;
+    return;
+  }
+  pendingSessionListRender = false;
   const renderSeq = ++sessionListRenderSeq;
   const activeIds = new Set([...terminals.keys()]);
 
   let displayed;
   if (currentSidebarTab === 'active') {
-    displayed = allSessions.filter(s => activeIds.has(s.id));
-    // Use manual order if available, fall back to last-used sort
-    if (sessionOrder.length > 0) {
-      const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
-      displayed.sort((a, b) => {
-        const oa = orderMap.has(a.id) ? orderMap.get(a.id) : 99999;
-        const ob = orderMap.has(b.id) ? orderMap.get(b.id) : 99999;
-        if (oa !== ob) return oa - ob;
-        return (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0);
-      });
-    } else {
-      displayed.sort((a, b) => (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0));
-    }
+    displayed = filterSessionsForSidebar({
+      sessions: allSessions,
+      activeSessionIds: activeIds,
+      currentSidebarTab
+    });
+    // Active list is ordered strictly by user placement. New sessions are
+    // appended to sessionOrder in creation order; closed sessions are pruned.
+    ensureSessionOrder();
+    const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
+    displayed.sort((a, b) => {
+      const oa = orderMap.has(a.id) ? orderMap.get(a.id) : Number.MAX_SAFE_INTEGER;
+      const ob = orderMap.has(b.id) ? orderMap.get(b.id) : Number.MAX_SAFE_INTEGER;
+      return oa - ob;
+    });
   } else {
-    displayed = [...allSessions];
+    displayed = filterSessionsForSidebar({
+      sessions: allSessions,
+      activeSessionIds: activeIds,
+      currentSidebarTab
+    });
     displayed.sort((a, b) => (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0));
   }
 
@@ -1421,11 +1482,11 @@ function renderSessionList() {
   if (displayed.length === 0) {
     const emptyEl = document.createElement('div');
     emptyEl.className = 'empty-list';
-    emptyEl.textContent = sidebarSearchLoading
-      ? 'Searching sessions...'
-      : currentSidebarTab === 'active'
-        ? 'No active sessions. Click a session in History or start a new one.'
-        : searchQuery ? 'No sessions match your search.' : 'No sessions found.';
+      emptyEl.textContent = sidebarSearchLoading
+        ? 'Searching sessions...'
+        : currentSidebarTab === 'active'
+          ? 'No active sessions. Click a session in History or start a new one.'
+          : searchQuery ? 'No sessions match your search.' : 'No completed sessions yet.';
     sessionList.appendChild(emptyEl);
     return;
   }
@@ -1540,31 +1601,59 @@ function renderSessionList() {
 }
 
 function startRenameSession(sessionId, titleEl) {
+  if (activeSessionRenameId && activeSessionRenameId !== sessionId) return;
   const currentTitle = titleEl.dataset.title || titleEl.textContent;
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'session-rename-input';
   input.value = currentTitle;
+  activeSessionRenameId = sessionId;
 
   titleEl.textContent = '';
   titleEl.appendChild(input);
   input.focus();
   input.select();
 
+  let committed = false;
+  const finishRename = () => {
+    if (activeSessionRenameId === sessionId) {
+      activeSessionRenameId = null;
+    }
+    if (pendingSessionListRender) {
+      renderSessionList();
+    }
+  };
+
   const commit = async () => {
+    if (committed) return;
+    committed = true;
     const newTitle = input.value.trim();
-    if (newTitle && newTitle !== currentTitle) {
-      await window.api.renameSession(sessionId, newTitle);
-      await refreshSessionList();
-    } else {
+    try {
+      if (newTitle && newTitle !== currentTitle) {
+        await window.api.renameSession(sessionId, newTitle);
+        await refreshSessionList();
+      } else {
+        titleEl.textContent = currentTitle;
+      }
+    } finally {
+      finishRename();
+    }
+  };
+
+  const cancel = () => {
+    if (committed) return;
+    committed = true;
+    input.value = currentTitle;
+    if (titleEl.contains(input)) {
       titleEl.textContent = currentTitle;
     }
+    finishRename();
   };
 
   input.addEventListener('blur', commit);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-    if (e.key === 'Escape') { input.value = currentTitle; input.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
     e.stopPropagation();
   });
   input.addEventListener('click', (e) => e.stopPropagation());
@@ -1700,15 +1789,24 @@ async function openSession(sessionId) {
 
 async function newSession() {
   if (creatingSession) return;
+
+  const settings = await window.api.getSettings();
+  applySettingsToControls(settings);
+
+  const availability = getNewSessionAvailability(settings);
+  if (!availability.available) {
+    showToast({ type: 'error', title: 'New session unavailable', body: availability.reason });
+    return;
+  }
+
   creatingSession = true;
 
   try {
     // Prompt for working directory if enabled
     let cwd = undefined;
-    const settings = await window.api.getSettings();
     if (settings.promptForWorkdir) {
       const picked = await window.api.pickDirectory(settings.defaultWorkdir || undefined);
-      if (picked === null) { creatingSession = false; return; } // user cancelled
+      if (picked === null) return;
       cwd = picked;
     } else if (settings.defaultWorkdir) {
       cwd = settings.defaultWorkdir;
@@ -1746,6 +1844,8 @@ async function newSession() {
     const termEntry = terminals.get(sessionId);
     if (termEntry) termEntry.titlePoll = titlePoll;
     saveTabState();
+  } catch (err) {
+    showToast({ type: 'error', title: 'Could not start new session', body: String(err?.message || err) });
   } finally {
     creatingSession = false;
   }
@@ -2493,16 +2593,7 @@ async function updateStatusPanel(sessionId) {
   const summaryText = status.summary?.text
     ? `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`
     : '<div class="status-summary-empty">No summary yet for this session.</div>';
-  const summaryMeta = `<div class="status-summary-meta">
-      <span class="status-summary-id" title="${escapeHtml(sessionId)}">
-        <span class="status-summary-id-label">🆔 Session ID</span>
-        <code>${escapeHtml(sessionId)}</code>
-      </span>
-      <div class="status-summary-actions">
-        <button class="status-summary-action status-open-session-directory" type="button" data-session-id="${escapeHtml(sessionId)}" title="Open session directory">Open Folder</button>
-        <button class="status-summary-action status-copy-session-id" type="button" data-session-id="${escapeHtml(sessionId)}" title="Copy session ID">Copy</button>
-      </div>
-    </div>`;
+  const summaryMeta = renderStatusSummaryMetaHtml(sessionId);
   html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
 
   // Next steps
@@ -2660,6 +2751,10 @@ async function showInstructions() {
 
   instructionsPanel.classList.remove('hidden');
   terminalArea.style.display = 'none';
+
+  if (typeof refreshReviewButton === 'function') {
+    refreshReviewButton().catch(err => console.warn('refreshReviewButton failed:', err));
+  }
 }
 
 function renderMarkdown(md, changedLineNumbers) {
@@ -2891,6 +2986,428 @@ document.getElementById('btn-import-instructions').addEventListener('click', () 
   showImportMenu();
 });
 
+// ===== Enhance Instructions =====
+let lastEnhanceBackup = null;
+let enhancementInFlight = false;
+
+const enhanceConfirmModal = document.getElementById('enhance-confirm-modal');
+const reviewModal = document.getElementById('review-modal');
+const reviewIframe = document.getElementById('review-modal-iframe');
+const reviewTimestampLabel = document.getElementById('review-modal-timestamp');
+const btnEnhance = document.getElementById('btn-enhance-instructions');
+const btnReview = document.getElementById('btn-review-enhancement');
+const enhanceConfirmContent = enhanceConfirmModal.querySelector('.enhance-modal-content');
+const reviewModalContent = reviewModal.querySelector('.review-modal-content');
+
+async function refreshReviewButton() {
+  try {
+    const backups = await window.api.enhanceListBackups();
+    // Prefer a pending proposal (has changes.html, not yet applied) over an already-applied one.
+    // If none pending, fall back to the most recent applied backup so the user can still rollback.
+    const pending = backups.find(b => b.hasChangesHtml && !b.applied);
+    const applied = backups.find(b => b.applied);
+    const target = pending || applied || null;
+
+    if (target) {
+      lastEnhanceBackup = target;
+      btnReview.classList.remove('hidden');
+      btnReview.title = pending
+        ? `Review proposed enhancement from ${target.timestamp}`
+        : `Review or roll back applied enhancement from ${target.timestamp}`;
+    } else {
+      lastEnhanceBackup = null;
+      btnReview.classList.add('hidden');
+    }
+  } catch (err) {
+    console.warn('Failed to list enhancement backups:', err);
+  }
+}
+
+function openEnhanceConfirm() {
+  enhanceConfirmModal.classList.remove('hidden');
+  // Focus the safe (cancel) button by default
+  setTimeout(() => document.getElementById('btn-enhance-cancel')?.focus(), 0);
+}
+function closeEnhanceConfirm() {
+  enhanceConfirmModal.classList.add('hidden');
+  if (!enhancementInFlight) btnEnhance.focus();
+}
+
+async function startEnhancement() {
+  if (enhancementInFlight) return;
+  enhancementInFlight = true;
+  closeEnhanceConfirm();
+  btnEnhance.disabled = true;
+
+  hideInstructions();
+  try {
+    // SINGLE atomic IPC: backup + write prompt file + spawn new session with
+    // the prompt baked into the CLI args via `-i`. Both Copilot CLI and
+    // `agency copilot` execute it on startup — no PTY-write timing involved.
+    const { sessionId, backup } = await window.api.enhanceStartSession();
+
+    showToast({
+      type: 'success',
+      title: backup.reused ? 'Reusing existing backup' : 'Backup created',
+      body: backup.reused
+        ? `No changes since ${backup.timestamp} — using that snapshot.`
+        : `Saved ${backup.fileCount} file(s) to ${backup.timestamp}`,
+    });
+
+    sessionAliveState.add(sessionId);
+    createTerminal(sessionId);
+    switchToSession(sessionId);
+    addTab(sessionId, 'Enhance Instructions');
+
+    if (!allSessions.find(s => s.id === sessionId)) {
+      allSessions.unshift({
+        id: sessionId,
+        title: 'Enhance Instructions',
+        cwd: '',
+        updatedAt: new Date().toISOString(),
+        tags: [],
+        resources: [],
+      });
+    }
+    currentSidebarTab = 'active';
+    document.querySelectorAll('.sidebar-tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.tab === 'active')
+    );
+    renderSessionList();
+    saveTabState();
+
+    showToast({
+      type: 'info',
+      title: 'Enhancement session started',
+      body: 'When it finishes, click Review on the Instructions panel.',
+    });
+  } catch (err) {
+    showToast({ type: 'error', title: 'Enhancement failed to start', body: String(err.message || err) });
+  } finally {
+    enhancementInFlight = false;
+    btnEnhance.disabled = false;
+  }
+}
+
+async function openReviewModal() {
+  if (!lastEnhanceBackup) {
+    await refreshReviewButton();
+    if (!lastEnhanceBackup) {
+      showToast({ type: 'info', title: 'No enhancement found', body: 'Run Enhance to generate one.' });
+      return;
+    }
+  }
+  let html;
+  try {
+    html = await window.api.enhanceGetBackupHtml(lastEnhanceBackup.timestamp);
+  } catch (err) {
+    showToast({ type: 'error', title: 'Failed to load report', body: String(err.message || err) });
+    return;
+  }
+  if (!html) {
+    showToast({ type: 'info', title: 'Report not ready yet', body: 'The enhancement session has not produced changes.html.' });
+    return;
+  }
+  reviewIframe.srcdoc = decorateReportHtml(html);
+  reviewTimestampLabel.textContent = lastEnhanceBackup.timestamp;
+  updateReviewModalActions();
+  reviewModal.classList.remove('hidden');
+  setTimeout(() => document.getElementById('btn-review-close')?.focus(), 0);
+}
+
+// Inject theme + diff-coloring overrides into the agent's report HTML so it
+// renders consistently in the iframe regardless of how the agent styled it.
+// We inject the override stylesheet at end-of-body to win cascade order, and
+// match the same specificity (html[data-theme="..."]) the report templates use.
+// We also run a JS pass that auto-colors unified-diff lines inside <pre> blocks
+// — older reports emit raw text diffs without semantic <ins>/<del> markup.
+function decorateReportHtml(html) {
+  const isDark = currentTheme !== 'latte';
+  const dataTheme = isDark ? 'dark' : 'light';
+  const palette = isDark
+    ? {
+        bg: '#1e1e2e', bgElev: '#181825', surface: '#313244', surfaceSoft: '#45475a',
+        text: '#cdd6f4', muted: '#a6adc8', soft: '#bac2de',
+        border: '#45475a', borderStrong: '#585b70', accent: '#cba6f7', accentSoft: 'rgba(203,166,247,0.14)',
+        link: '#89b4fa',
+        addBg: 'rgba(166, 227, 161, 0.18)', addFg: '#a6e3a1', addBorder: '#a6e3a1',
+        delBg: 'rgba(243, 139, 168, 0.18)', delFg: '#f38ba8', delBorder: '#f38ba8',
+        ctxFg: '#a6adc8',
+      }
+    : {
+        bg: '#eff1f5', bgElev: '#e6e9ef', surface: '#ccd0da', surfaceSoft: '#dce0e8',
+        text: '#4c4f69', muted: '#6c6f85', soft: '#5c5f77',
+        border: '#bcc0cc', borderStrong: '#acb0be', accent: '#8839ef', accentSoft: 'rgba(136,57,239,0.14)',
+        link: '#1e66f5',
+        addBg: 'rgba(64, 160, 43, 0.18)', addFg: '#40a02b', addBorder: '#40a02b',
+        delBg: 'rgba(210, 15, 57, 0.18)', delFg: '#d20f39', delBorder: '#d20f39',
+        ctxFg: '#6c6f85',
+      };
+  const overrideStyle = `<style id="deepsky-report-overrides">
+    html[data-theme="${dataTheme}"], html[data-theme="dark"], html[data-theme="light"], :root {
+      color-scheme: ${dataTheme} !important;
+      --cp-bg: ${palette.bg} !important;
+      --cp-bg-elevated: ${palette.bgElev} !important;
+      --cp-surface: ${palette.surface} !important;
+      --cp-surface-soft: ${palette.surfaceSoft} !important;
+      --cp-border: ${palette.border} !important;
+      --cp-border-strong: ${palette.borderStrong} !important;
+      --cp-text: ${palette.text} !important;
+      --cp-text-muted: ${palette.muted} !important;
+      --cp-text-soft: ${palette.soft} !important;
+      --cp-accent: ${palette.accent} !important;
+      --cp-accent-hover: ${palette.accent} !important;
+      --cp-accent-soft: ${palette.accentSoft} !important;
+      --cp-link: ${palette.link} !important;
+      --cp-panel: ${palette.surface} !important;
+      --cp-panel-strong: ${palette.surface} !important;
+    }
+    html, body { background: ${palette.bg} !important; color: ${palette.text} !important; }
+    /* Semantic diff markup */
+    ins, .diff-add, .diff-line.added, .diff-add-line, .added {
+      background: ${palette.addBg} !important;
+      color: ${palette.addFg} !important;
+      text-decoration: none !important;
+    }
+    del, .diff-remove, .diff-line.removed, .diff-del-line, .removed {
+      background: ${palette.delBg} !important;
+      color: ${palette.delFg} !important;
+      text-decoration: none !important;
+    }
+    /* Block-level diff lines DeepSky auto-wraps in <pre> blocks */
+    .deepsky-diff-add {
+      display: block;
+      background: ${palette.addBg};
+      color: ${palette.addFg};
+      border-left: 3px solid ${palette.addBorder};
+      padding: 1px 8px;
+      margin: 0 -8px;
+    }
+    .deepsky-diff-del {
+      display: block;
+      background: ${palette.delBg};
+      color: ${palette.delFg};
+      border-left: 3px solid ${palette.delBorder};
+      padding: 1px 8px;
+      margin: 0 -8px;
+    }
+    .deepsky-diff-ctx {
+      display: block;
+      color: ${palette.ctxFg};
+      padding: 1px 8px;
+      margin: 0 -8px;
+    }
+  </style>
+  <script>
+    (function(){
+      try { document.documentElement.setAttribute('data-theme', '${dataTheme}'); } catch(_) {}
+      // Remove any prefers-color-scheme based theme inversions the report tried to apply
+      try {
+        var mo = new MutationObserver(function(){
+          if (document.documentElement.getAttribute('data-theme') !== '${dataTheme}') {
+            document.documentElement.setAttribute('data-theme', '${dataTheme}');
+          }
+        });
+        mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      } catch(_) {}
+      // Auto-color unified-diff lines (+/-) inside <pre> blocks for reports
+      // that emitted raw text diffs without semantic markup.
+      function decorateDiffs() {
+        document.querySelectorAll('pre').forEach(function(pre){
+          if (pre.dataset.deepskyDecorated) return;
+          var raw = pre.textContent || '';
+          var lines = raw.split('\\n');
+          // Heuristic: only treat as diff if at least 2 lines start with + or - (and not ++ or -- which are headers)
+          var diffLineCount = 0;
+          for (var i = 0; i < lines.length; i++) {
+            var l = lines[i];
+            if ((l[0] === '+' || l[0] === '-') && l[1] !== l[0]) diffLineCount++;
+          }
+          if (diffLineCount < 2) return;
+          var frag = document.createDocumentFragment();
+          for (var j = 0; j < lines.length; j++) {
+            var line = lines[j];
+            var span = document.createElement('span');
+            if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) {
+              span.className = 'deepsky-diff-ctx';
+              span.style.fontWeight = '600';
+            } else if (line[0] === '+') {
+              span.className = 'deepsky-diff-add';
+            } else if (line[0] === '-') {
+              span.className = 'deepsky-diff-del';
+            } else {
+              span.className = 'deepsky-diff-ctx';
+            }
+            span.textContent = line + (j < lines.length - 1 ? '\\n' : '');
+            frag.appendChild(span);
+          }
+          pre.textContent = '';
+          pre.appendChild(frag);
+          pre.dataset.deepskyDecorated = '1';
+        });
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', decorateDiffs);
+      } else {
+        decorateDiffs();
+      }
+    })();
+  </script>`;
+  // Inject at END of body so we win cascade order against the report's own CSS.
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, overrideStyle + '</body>');
+  }
+  // No </body>? Append.
+  return html + overrideStyle;
+}
+
+function updateReviewModalActions() {
+  const btnApply = document.getElementById('btn-review-apply');
+  const btnDiscard = document.getElementById('btn-review-discard');
+  const btnRollback = document.getElementById('btn-review-rollback');
+  if (!lastEnhanceBackup) {
+    btnApply.classList.add('hidden');
+    btnDiscard.classList.add('hidden');
+    btnRollback.classList.add('hidden');
+    return;
+  }
+  const pending = lastEnhanceBackup.hasProposed && !lastEnhanceBackup.applied;
+  btnApply.classList.toggle('hidden', !pending);
+  btnDiscard.classList.toggle('hidden', !pending);
+  btnRollback.classList.toggle('hidden', !lastEnhanceBackup.applied);
+}
+
+function focusReviewTrigger() {
+  if (!btnReview.classList.contains('hidden')) {
+    btnReview.focus();
+    return;
+  }
+  btnEnhance.focus();
+}
+
+function focusReviewModalAction() {
+  const focusTarget = [
+    document.getElementById('btn-review-apply'),
+    document.getElementById('btn-review-discard'),
+    document.getElementById('btn-review-rollback'),
+    document.getElementById('btn-review-close'),
+  ].find((button) => button && !button.classList.contains('hidden') && !button.disabled);
+
+  focusTarget?.focus();
+}
+
+function closeReviewModal({ restoreFocus = true } = {}) {
+  reviewModal.classList.add('hidden');
+  reviewIframe.removeAttribute('srcdoc');
+  if (restoreFocus) focusReviewTrigger();
+}
+
+async function applyEnhancement() {
+  if (!lastEnhanceBackup) return;
+  try {
+    const result = await window.api.enhanceApply(lastEnhanceBackup.timestamp);
+    showToast({
+      type: 'success',
+      title: 'Enhancement applied',
+      body: `${result.applied.length} change(s) applied. Roll back from the same Review button if needed.`,
+    });
+    closeReviewModal({ restoreFocus: false });
+    await refreshReviewButton();
+    focusReviewTrigger();
+    if (!instructionsPanel.classList.contains('hidden')) {
+      await showInstructions();
+    }
+  } catch (err) {
+    showToast({ type: 'error', title: 'Apply failed', body: String(err.message || err) });
+    await refreshReviewButton();
+    updateReviewModalActions();
+    focusReviewModalAction();
+  }
+}
+
+async function discardEnhancement() {
+  if (!lastEnhanceBackup) return;
+  const ok = confirm(`Discard the proposed changes from ${lastEnhanceBackup.timestamp}? Your current instructions are not modified.`);
+  if (!ok) return;
+  try {
+    await window.api.enhanceDiscard(lastEnhanceBackup.timestamp);
+    showToast({ type: 'info', title: 'Proposal discarded', body: 'Your current instructions remain unchanged.' });
+    closeReviewModal({ restoreFocus: false });
+    await refreshReviewButton();
+    focusReviewTrigger();
+  } catch (err) {
+    showToast({ type: 'error', title: 'Discard failed', body: String(err.message || err) });
+    await refreshReviewButton();
+    updateReviewModalActions();
+    focusReviewModalAction();
+  }
+}
+
+async function rollbackEnhancement() {
+  if (!lastEnhanceBackup) return;
+  const ok = confirm(`Roll back to backup ${lastEnhanceBackup.timestamp}? This will overwrite your current instructions and playbooks.`);
+  if (!ok) return;
+  try {
+    const result = await window.api.enhanceRollback(lastEnhanceBackup.timestamp);
+    showToast({
+      type: 'success',
+      title: 'Rolled back',
+      body: `Restored ${result.restored.length} item(s) from ${result.timestamp}`,
+    });
+    closeReviewModal({ restoreFocus: false });
+    await refreshReviewButton();
+    focusReviewTrigger();
+    if (!instructionsPanel.classList.contains('hidden')) {
+      await showInstructions();
+    }
+  } catch (err) {
+    showToast({ type: 'error', title: 'Rollback failed', body: String(err.message || err) });
+    await refreshReviewButton();
+    updateReviewModalActions();
+    focusReviewModalAction();
+  }
+}
+
+btnEnhance.addEventListener('click', openEnhanceConfirm);
+document.getElementById('btn-enhance-cancel').addEventListener('click', closeEnhanceConfirm);
+document.getElementById('btn-enhance-confirm').addEventListener('click', startEnhancement);
+btnReview.addEventListener('click', openReviewModal);
+document.getElementById('btn-review-close').addEventListener('click', closeReviewModal);
+document.getElementById('btn-review-apply').addEventListener('click', applyEnhancement);
+document.getElementById('btn-review-discard').addEventListener('click', discardEnhancement);
+document.getElementById('btn-review-rollback').addEventListener('click', rollbackEnhancement);
+enhanceConfirmModal.addEventListener('click', (e) => {
+  if (isBackdropClickTarget(e.target)) closeEnhanceConfirm();
+});
+reviewModal.addEventListener('click', (e) => {
+  if (isBackdropClickTarget(e.target)) closeReviewModal();
+});
+
+// Trap focus inside the active modal and let Esc close it.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') {
+    if (!reviewModal.classList.contains('hidden') && trapFocusWithin(e, reviewModalContent)) {
+      return;
+    }
+    if (!enhanceConfirmModal.classList.contains('hidden') && trapFocusWithin(e, enhanceConfirmContent)) {
+      return;
+    }
+  }
+  if (e.key === 'Escape') {
+    if (!reviewModal.classList.contains('hidden')) {
+      closeReviewModal();
+      e.stopPropagation();
+    } else if (!enhanceConfirmModal.classList.contains('hidden')) {
+      closeEnhanceConfirm();
+      e.stopPropagation();
+    }
+  }
+});
+
+// Refresh on initial load
+refreshReviewButton();
+
+
 function showImportMenu() {
   // Remove existing menu if any
   document.querySelectorAll('.import-menu').forEach(el => el.remove());
@@ -3075,8 +3592,9 @@ maxConcurrentInput.addEventListener('change', (e) => {
   if (val >= 1 && val <= 20) window.api.updateSettings({ maxConcurrent: val });
 });
 
-useAgencyCopilotInput.addEventListener('change', (e) => {
-  window.api.updateSettings({ useAgencyCopilot: e.target.checked });
+useAgencyCopilotInput.addEventListener('change', async (e) => {
+  const settings = await window.api.updateSettings({ useAgencyCopilot: e.target.checked });
+  applySettingsToControls(settings);
 });
 
 promptWorkdirInput.addEventListener('change', (e) => {

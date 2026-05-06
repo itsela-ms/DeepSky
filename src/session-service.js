@@ -69,7 +69,10 @@ class SessionService {
   }
 
   async listSessions() {
-    const entries = await fs.promises.readdir(this.dir, { withFileTypes: true });
+    const entries = await fs.promises.readdir(this.dir, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') return [];
+      throw error;
+    });
     const dirs = entries.filter(e => e.isDirectory());
 
     const results = await Promise.allSettled(dirs.map(entry => this._loadSession(entry)));
@@ -86,7 +89,10 @@ class SessionService {
     const needle = String(query || '').trim().toLowerCase();
     if (!needle) return [];
 
-    const entries = await fs.promises.readdir(this.dir, { withFileTypes: true });
+    const entries = await fs.promises.readdir(this.dir, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') return [];
+      throw error;
+    });
     const dirs = entries.filter(e => e.isDirectory());
 
     const results = await Promise.allSettled(dirs.map(entry => this._searchSessionOccurrences(entry, needle)));
@@ -472,7 +478,10 @@ class SessionService {
   }
 
   async cleanEmptySessions() {
-    const entries = await fs.promises.readdir(this.dir, { withFileTypes: true });
+    const entries = await fs.promises.readdir(this.dir, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') return [];
+      throw error;
+    });
     let cleaned = 0;
 
     for (const entry of entries) {

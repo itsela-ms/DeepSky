@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { isValidSessionId } = require('./app-support');
 
-function resolveSessionDirectory(sessionStateDir, sessionId, deps = {}) {
+function resolveSessionPath(sessionStateDir, sessionId, relativePath = '', deps = {}) {
   const {
     realpathImpl = fs.promises.realpath,
     lstatImpl = fs.promises.lstat,
@@ -12,15 +12,16 @@ function resolveSessionDirectory(sessionStateDir, sessionId, deps = {}) {
   }
 
   const sessionRoot = path.resolve(sessionStateDir);
-  const sessionDir = path.resolve(sessionRoot, sessionId);
-  if (!sessionDir.startsWith(sessionRoot + path.sep) && sessionDir !== sessionRoot) {
+  const baseSessionDir = path.resolve(sessionRoot, sessionId);
+  const targetPath = path.resolve(baseSessionDir, relativePath);
+  if (!targetPath.startsWith(baseSessionDir + path.sep) && targetPath !== baseSessionDir) {
     throw new Error('Invalid session directory.');
   }
 
   return Promise.all([
     realpathImpl(sessionRoot),
-    realpathImpl(sessionDir),
-    lstatImpl(sessionDir),
+    realpathImpl(targetPath),
+    lstatImpl(targetPath),
   ]).then(([sessionRootRealPath, resolvedDir, sessionStat]) => {
     if (
       sessionStat.isSymbolicLink() ||
@@ -33,6 +34,14 @@ function resolveSessionDirectory(sessionStateDir, sessionId, deps = {}) {
     }
     return resolvedDir;
   });
+}
+
+function resolveSessionDirectory(sessionStateDir, sessionId, deps = {}) {
+  return resolveSessionPath(sessionStateDir, sessionId, '', deps);
+}
+
+function resolveSessionFilesDirectory(sessionStateDir, sessionId, deps = {}) {
+  return resolveSessionPath(sessionStateDir, sessionId, 'files', deps);
 }
 
 function resolveGeneratedFilePath(sessionStateDir, sessionId, relativePath, deps = {}) {
@@ -77,4 +86,5 @@ function resolveGeneratedFilePath(sessionStateDir, sessionId, relativePath, deps
 module.exports = {
   resolveGeneratedFilePath,
   resolveSessionDirectory,
+  resolveSessionFilesDirectory,
 };

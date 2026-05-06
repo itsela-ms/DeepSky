@@ -6,6 +6,7 @@ const {
   pickNotificationDisplay,
   resolveCommandPath,
   resolveAgencyInfo,
+  resolveCopilotInfo,
   resolveCopilotPath,
 } = require('../src/app-support');
 
@@ -21,6 +22,17 @@ describe('app-support', () => {
       const execSync = vi.fn(() => 'C:\\Tools\\copilot.exe\r\n');
       const existsSync = vi.fn((file) => file === 'C:\\Tools\\copilot.exe');
       expect(resolveCopilotPath({ execSync, existsSync, env: {} })).toBe('C:\\Tools\\copilot.exe');
+    });
+  });
+
+  describe('resolveCopilotInfo', () => {
+    it('reports Copilot CLI as unavailable when not found', () => {
+      const execSync = vi.fn(() => { throw new Error('missing'); });
+      const existsSync = vi.fn(() => false);
+      expect(resolveCopilotInfo({ execSync, existsSync, env: {} })).toEqual({
+        path: 'copilot',
+        found: false,
+      });
     });
   });
 
