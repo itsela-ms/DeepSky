@@ -1472,7 +1472,16 @@ function createTerminal(sessionId) {
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new WebLinksAddon((e, uri) => window.api.openExternal(uri)));
+  // IMPORTANT — DO NOT reintroduce a real handler here.
+  //
+  // The embedded Copilot CLI emits OSC 8 hyperlinks and opens links itself when
+  // the user clicks/Ctrl-clicks them. If we also pass `(e, uri) => window.api.openExternal(uri)`
+  // (or any non-empty handler), every link opens TWICE — once by the CLI, once by us.
+  //
+  // WebLinksAddon must still be loaded so URLs are visually decorated and the cursor
+  // becomes a pointer on hover. With a no-op callback, the addon provides only the
+  // hover affordance and the CLI remains the sole opener.
+  terminal.loadAddon(new WebLinksAddon(() => {}));
 
   const wrapper = document.createElement('div');
   wrapper.className = 'terminal-wrapper';
