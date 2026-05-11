@@ -2,7 +2,7 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { deriveSessionState } = require('./session-state');
-const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
+const { createTerminalKeyHandler, getShortcutKey } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
 const { resolveSidebarDragWidth } = require('./sidebar-resize');
 
@@ -2915,9 +2915,11 @@ document.addEventListener('wheel', (e) => {
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
+  // Resolve letter shortcuts via physical code so they work on non-Latin layouts (e.g. Hebrew).
+  const sk = getShortcutKey(e);
 
   // Ctrl/Cmd+N or Ctrl/Cmd+T: Create new session from anywhere
-  if (mod && (e.key === 'n' || e.key === 't')) { 
+  if (mod && !e.shiftKey && (sk === 'n' || sk === 't')) { 
     e.preventDefault(); 
     newSession(); 
   }
@@ -2938,7 +2940,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Ctrl/Cmd+W: Close current session tab
-  if (mod && e.key === 'w') {
+  if (mod && sk === 'w') {
     e.preventDefault();
     const ae = document.activeElement;
     const isXterm = ae?.classList.contains('xterm-helper-textarea');
@@ -2947,20 +2949,20 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Ctrl/Cmd+Shift+T: Restore last closed tab
-  if (mod && e.shiftKey && e.key === 'T') {
+  if (mod && e.shiftKey && sk === 't') {
     e.preventDefault();
     const sessionId = recentlyClosedSessions.pop();
     if (sessionId) openSession(sessionId);
   }
 
   // Ctrl/Cmd+I: Toggle status panel
-  if (mod && e.key === 'i') {
+  if (mod && sk === 'i') {
     e.preventDefault();
     toggleStatusPanel();
   }
 
   // Ctrl/Cmd+F: Open in-session search when a session is active
-  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+  if (mod && !e.shiftKey && sk === 'f') {
     e.preventDefault();
     if (activeSessionId && terminals.has(activeSessionId)) openSessionSearch();
     else focusSidebarSearch();

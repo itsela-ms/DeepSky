@@ -1,4 +1,23 @@
 /**
+ * Returns the logical shortcut key for a KeyboardEvent in a layout-independent way.
+ *
+ * Letter shortcuts (Ctrl+V, Ctrl+T, ...) must work regardless of the active
+ * keyboard layout. On non-Latin layouts (e.g. Hebrew, Cyrillic) `e.key` returns
+ * the localized character (Ctrl+V → 'ה'), so we resolve letter keys from the
+ * physical `e.code` ('KeyV' → 'v') and fall back to `e.key` for everything else.
+ *
+ * @param {KeyboardEvent} e
+ * @returns {string} lowercase Latin letter for letter keys, otherwise lowercased `e.key`.
+ */
+function getShortcutKey(e) {
+  if (e.code && e.code.length === 4 && e.code.startsWith('Key')) {
+    return e.code.charAt(3).toLowerCase();
+  }
+  const k = e.key || '';
+  return k.length === 1 ? k.toLowerCase() : k;
+}
+
+/**
  * Creates the xterm custom key event handler for a terminal session.
  *
  * Returns false  → let the event bubble up to the document-level keydown handler.
@@ -14,7 +33,7 @@ function createTerminalKeyHandler(sessionId, terminal, api, hooks = {}) {
     if (e.type !== 'keydown') return true;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key || '';
-    const lowerKey = key.length === 1 ? key.toLowerCase() : key;
+    const lowerKey = getShortcutKey(e);
 
     // Bubble zoom shortcuts to the document handler
     if (mod && (key === '=' || key === '+' || key === '-' || key === '0')) return false;
@@ -79,4 +98,4 @@ function createTerminalKeyHandler(sessionId, terminal, api, hooks = {}) {
   };
 }
 
-module.exports = { createTerminalKeyHandler };
+module.exports = { createTerminalKeyHandler, getShortcutKey };
