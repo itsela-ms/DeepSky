@@ -468,9 +468,8 @@ if (!hasSingleInstanceLock) {
 
   // IPC: Open external URL
   ipcMain.handle('shell:openExternal', (event, url) => {
-    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-      shell.openExternal(url);
-    }
+    if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
+    shell.openExternal(url);
   });
 
   // IPC: Notifications

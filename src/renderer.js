@@ -2,7 +2,7 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar } = require('./session-state');
-const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
+const { createTerminalKeyHandler, getShortcutKey } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
 const { resolveSidebarDragWidth } = require('./sidebar-resize');
 const { popRestorableClosedSession } = require('./recently-closed');
@@ -1866,7 +1866,16 @@ function createTerminal(sessionId) {
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new WebLinksAddon((e, uri) => window.api.openExternal(uri)));
+  // IMPORTANT — DO NOT reintroduce a real handler here.
+  //
+  // The embedded Copilot CLI emits OSC 8 hyperlinks and opens links itself when
+  // the user clicks/Ctrl-clicks them. If we also pass `(e, uri) => window.api.openExternal(uri)`
+  // (or any non-empty handler), every link opens TWICE — once by the CLI, once by us.
+  //
+  // WebLinksAddon must still be loaded so URLs are visually decorated and the cursor
+  // becomes a pointer on hover. With a no-op callback, the addon provides only the
+  // hover affordance and the CLI remains the sole opener.
+  terminal.loadAddon(new WebLinksAddon(() => {}));
 
   const wrapper = document.createElement('div');
   wrapper.className = 'terminal-wrapper';
@@ -3796,9 +3805,11 @@ document.addEventListener('wheel', (e) => {
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
+  // Resolve letter shortcuts via physical code so they work on non-Latin layouts (e.g. Hebrew).
+  const sk = getShortcutKey(e);
 
   // Ctrl/Cmd+N or Ctrl/Cmd+T: Create new session from anywhere
-  if (mod && (e.key === 'n' || e.key === 't')) { 
+  if (mod && !e.shiftKey && (sk === 'n' || sk === 't')) { 
     e.preventDefault(); 
     newSession(); 
   }
@@ -3819,7 +3830,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Ctrl/Cmd+W: Close current session tab
-  if (mod && e.key === 'w') {
+  if (mod && sk === 'w') {
     e.preventDefault();
     const ae = document.activeElement;
     const isXterm = ae?.classList.contains('xterm-helper-textarea');
@@ -3828,7 +3839,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Ctrl/Cmd+Shift+T: Restore last closed tab
-  if (mod && e.shiftKey && e.key === 'T') {
+  if (mod && e.shiftKey && sk === 't') {
     e.preventDefault();
     const validIds = new Set([...allSessions.map(session => session.id), ...terminals.keys()]);
     const sessionId = popRestorableClosedSession(recentlyClosedSessions, validIds);
@@ -3836,13 +3847,13 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Ctrl/Cmd+I: Toggle status panel
-  if (mod && e.key === 'i') {
+  if (mod && sk === 'i') {
     e.preventDefault();
     toggleStatusPanel();
   }
 
   // Ctrl/Cmd+F: Open in-session search when a session is active
-  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+  if (mod && !e.shiftKey && sk === 'f') {
     e.preventDefault();
     if (activeSessionId && terminals.has(activeSessionId)) openSessionSearch();
     else focusSidebarSearch();

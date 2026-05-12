@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-const { createTerminalKeyHandler } = require('../src/keyboard-shortcuts');
+const { createTerminalKeyHandler, getShortcutKey } = require('../src/keyboard-shortcuts');
 
 /** Build a minimal synthetic keydown event. */
 function key(overrides = {}) {
@@ -282,5 +282,90 @@ describe('createTerminalKeyHandler', () => {
     const specificHandler = createTerminalKeyHandler('my-unique-session', terminal, api);
     specificHandler(key({ ctrlKey: true, key: 'Backspace' }));
     expect(api.writePty).toHaveBeenCalledWith('my-unique-session', '\x17');
+  });
+
+  // ── Non-Latin keyboard layouts (e.g. Hebrew) ─────────────────────────────
+  // On a Hebrew layout, pressing the V key produces e.key === 'ה' but
+  // e.code === 'KeyV'. Shortcuts must work regardless of layout.
+
+  it('Ctrl+V on Hebrew layout: triggers paste via physical key code', () => {
+    const e = key({ ctrlKey: true, key: 'ה', code: 'KeyV' });
+    const result = handler(e);
+
+    expect(result).toBe(false);
+    expect(api.pasteText).toHaveBeenCalled();
+    expect(e.preventDefault).toHaveBeenCalled();
+  });
+
+  it('Ctrl+C on Hebrew layout with selection: copies via physical key code', () => {
+    terminal.hasSelection.mockReturnValue(true);
+    const e = key({ ctrlKey: true, key: 'ב', code: 'KeyC' });
+    const result = handler(e);
+
+    expect(result).toBe(false);
+    expect(api.copyText).toHaveBeenCalledWith('selected text');
+    expect(terminal.clearSelection).toHaveBeenCalled();
+  });
+
+  it('Ctrl+T on Hebrew layout: bubbles to document handler', () => {
+    expect(handler(key({ ctrlKey: true, key: 'א', code: 'KeyT' }))).toBe(false);
+  });
+
+  it('Ctrl+N on Hebrew layout: bubbles to document handler', () => {
+    expect(handler(key({ ctrlKey: true, key: 'מ', code: 'KeyN' }))).toBe(false);
+  });
+
+  it('Ctrl+W on Hebrew layout: bubbles to document handler', () => {
+    expect(handler(key({ ctrlKey: true, key: '׳', code: 'KeyW' }))).toBe(false);
+  });
+
+  it('Ctrl+I on Hebrew layout: bubbles to document handler', () => {
+    expect(handler(key({ ctrlKey: true, key: 'ן', code: 'KeyI' }))).toBe(false);
+  });
+
+  it('Ctrl+F on Hebrew layout: bubbles to document handler', () => {
+    expect(handler(key({ ctrlKey: true, key: 'כ', code: 'KeyF' }))).toBe(false);
+  });
+
+  it('Meta+V on Hebrew layout (macOS): triggers paste', () => {
+    const e = key({ metaKey: true, key: 'ה', code: 'KeyV' });
+    const result = handler(e);
+
+    expect(result).toBe(false);
+    expect(api.pasteText).toHaveBeenCalled();
+  });
+});
+
+describe('getShortcutKey', () => {
+  it('returns the Latin letter from physical KeyX code regardless of e.key', () => {
+    expect(getShortcutKey({ code: 'KeyV', key: 'ה' })).toBe('v');
+    expect(getShortcutKey({ code: 'KeyT', key: 'א' })).toBe('t');
+    expect(getShortcutKey({ code: 'KeyA', key: 'ש' })).toBe('a');
+  });
+
+  it('returns lowercased letter when only e.key is available', () => {
+    expect(getShortcutKey({ key: 'V' })).toBe('v');
+    expect(getShortcutKey({ key: 'a' })).toBe('a');
+  });
+
+  it('returns named keys verbatim', () => {
+    expect(getShortcutKey({ key: 'Enter' })).toBe('Enter');
+    expect(getShortcutKey({ key: 'Backspace' })).toBe('Backspace');
+    expect(getShortcutKey({ key: 'Escape' })).toBe('Escape');
+    expect(getShortcutKey({ key: 'Tab' })).toBe('Tab');
+  });
+
+  it('returns punctuation/digits unchanged (lowercased)', () => {
+    expect(getShortcutKey({ key: '=' })).toBe('=');
+    expect(getShortcutKey({ key: '0' })).toBe('0');
+  });
+
+  it('handles missing e.key gracefully', () => {
+    expect(getShortcutKey({})).toBe('');
+  });
+
+  it('does not treat non-letter codes (e.g. Digit1, F1) as letters', () => {
+    expect(getShortcutKey({ code: 'Digit1', key: '1' })).toBe('1');
+    expect(getShortcutKey({ code: 'F1', key: 'F1' })).toBe('F1');
   });
 });
