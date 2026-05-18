@@ -83,7 +83,20 @@ function resolveGeneratedFilePath(sessionStateDir, sessionId, relativePath, deps
   });
 }
 
+async function getSessionDirectoryAvailability(sessionStateDir, sessionId, deps = {}) {
+  const [sessionDirectoryResult, filesDirectoryResult] = await Promise.allSettled([
+    Promise.resolve().then(() => resolveSessionDirectory(sessionStateDir, sessionId, deps)),
+    Promise.resolve().then(() => resolveSessionFilesDirectory(sessionStateDir, sessionId, deps)),
+  ]);
+
+  return {
+    sessionDirectoryAvailable: sessionDirectoryResult.status === 'fulfilled',
+    filesDirectoryAvailable: filesDirectoryResult.status === 'fulfilled',
+  };
+}
+
 module.exports = {
+  getSessionDirectoryAvailability,
   resolveGeneratedFilePath,
   resolveSessionDirectory,
   resolveSessionFilesDirectory,

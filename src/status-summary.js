@@ -7,10 +7,25 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function renderStatusSummaryMetaHtml(sessionId) {
+function renderSummaryActionButton(sessionId, actionClass, icon, label, available, availableTitle, unavailableTitle) {
   const escapedSessionId = escapeHtml(sessionId);
+  const title = available ? availableTitle : unavailableTitle;
+  const unavailableClass = available ? '' : ' is-unavailable';
+  const disabledAttrs = available ? '' : ' disabled';
+
+  return `<button class="status-summary-action ${actionClass}${unavailableClass}" type="button" data-session-id="${escapedSessionId}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"${disabledAttrs}>
+            <span class="status-summary-action-icon">${icon}</span>
+            <span>${label}</span>
+          </button>`;
+}
+
+function renderStatusSummaryMetaHtml(sessionId, availability = {}) {
+  const escapedSessionId = escapeHtml(sessionId);
+  const sessionDirectoryAvailable = availability.sessionDirectoryAvailable !== false;
+  const filesDirectoryAvailable = availability.filesDirectoryAvailable !== false;
+
   return `<div class="status-summary-meta">
-      <div class="status-summary-identity">
+      <div class="status-summary-id-block">
         <span class="status-summary-id-label">🆔 Session ID</span>
         <div class="status-summary-id-row">
           <code class="status-summary-id" title="${escapedSessionId}">${escapedSessionId}</code>
@@ -22,14 +37,24 @@ function renderStatusSummaryMetaHtml(sessionId) {
       <div class="status-summary-actions-block">
         <span class="status-summary-actions-label">Quick actions</span>
         <div class="status-summary-actions">
-          <button class="status-summary-action status-open-session-directory" type="button" data-session-id="${escapedSessionId}" title="Open session directory">
-            <span class="status-summary-action-icon">📁</span>
-            <span>session</span>
-          </button>
-          <button class="status-summary-action status-open-session-files-directory" type="button" data-session-id="${escapedSessionId}" title="Open session files directory">
-            <span class="status-summary-action-icon">📄</span>
-            <span>files</span>
-          </button>
+          ${renderSummaryActionButton(
+            sessionId,
+            'status-open-session-directory',
+            '📁',
+            'session',
+            sessionDirectoryAvailable,
+            'Open session directory',
+            'Session directory unavailable',
+          )}
+          ${renderSummaryActionButton(
+            sessionId,
+            'status-open-session-files-directory',
+            '📄',
+            'files',
+            filesDirectoryAvailable,
+            'Open session files directory',
+            'Session files directory unavailable',
+          )}
         </div>
       </div>
     </div>`;

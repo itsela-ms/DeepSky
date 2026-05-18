@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   // Sessions
-  listSessions: () => ipcRenderer.invoke('sessions:list'),
+  listSessions: (options) => ipcRenderer.invoke('sessions:list', options),
   searchSessions: (query) => ipcRenderer.invoke('sessions:search', query),
   getLastUserPrompt: (sessionId) => ipcRenderer.invoke('session:getLastUserPrompt', sessionId),
   renameSession: (sessionId, title) => ipcRenderer.invoke('session:rename', sessionId, title),
@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   addResource: (sessionId, url) => ipcRenderer.invoke('resource:add', sessionId, url),
   removeResource: (sessionId, key) => ipcRenderer.invoke('resource:remove', sessionId, key),
   getSessionStatus: (sessionId) => ipcRenderer.invoke('session:getStatus', sessionId),
+  getSessionDirectoryAvailability: (sessionId) => ipcRenderer.invoke('session:getDirectoryAvailability', sessionId),
   openSessionDirectory: (sessionId) => ipcRenderer.invoke('session:openDirectory', sessionId),
   openSessionFilesDirectory: (sessionId) => ipcRenderer.invoke('session:openFilesDirectory', sessionId),
   openGeneratedFile: (sessionId, relativePath) => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath),
@@ -73,6 +74,13 @@ contextBridge.exposeInMainWorld('api', {
   // App info
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   getChangelog: () => ipcRenderer.invoke('app:getChangelog'),
+  getBrochureAvailability: () => ipcRenderer.invoke('app:getBrochureAvailability'),
+  openBrochure: () => ipcRenderer.invoke('app:openBrochure'),
+  onRestoreTabShortcut: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('shortcut:restore-tab', listener);
+    return () => ipcRenderer.removeListener('shortcut:restore-tab', listener);
+  },
 
   // Updates
   checkForUpdates: () => ipcRenderer.invoke('update:check'),

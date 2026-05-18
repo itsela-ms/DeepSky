@@ -6,6 +6,7 @@ const {
   pickNotificationDisplay,
   resolveCommandPath,
   resolveAgencyInfo,
+  resolveBrochureInfo,
   resolveCopilotInfo,
   resolveCopilotPath,
 } = require('../src/app-support');
@@ -56,6 +57,47 @@ describe('app-support', () => {
       const existsSync = vi.fn(() => false);
       expect(resolveAgencyInfo({ execSync, existsSync, env: {} })).toEqual({
         path: 'agency',
+        found: false,
+      });
+    });
+  });
+
+  describe('resolveBrochureInfo', () => {
+    it('prefers the documents brochure when present', () => {
+      const existsSync = vi.fn((file) => file === 'C:\\Docs\\deepsky-brochure.html');
+      expect(resolveBrochureInfo({
+        appPath: 'C:\\DeepSky',
+        documentsPath: 'C:\\Docs',
+        homeDir: 'C:\\Users\\dev',
+        existsSync,
+      })).toEqual({
+        path: 'C:\\Docs\\deepsky-brochure.html',
+        found: true,
+      });
+    });
+
+    it('falls back to the known OneDrive documents path when needed', () => {
+      const existsSync = vi.fn((file) => file === 'C:\\Users\\dev\\OneDrive - Microsoft\\Documents\\deepsky-brochure.html');
+      expect(resolveBrochureInfo({
+        appPath: 'C:\\DeepSky',
+        documentsPath: 'C:\\Users\\dev\\Documents',
+        homeDir: 'C:\\Users\\dev',
+        existsSync,
+      })).toEqual({
+        path: 'C:\\Users\\dev\\OneDrive - Microsoft\\Documents\\deepsky-brochure.html',
+        found: true,
+      });
+    });
+
+    it('reports brochure as unavailable when no candidate exists', () => {
+      const existsSync = vi.fn(() => false);
+      expect(resolveBrochureInfo({
+        appPath: 'C:\\DeepSky',
+        documentsPath: 'C:\\Docs',
+        homeDir: 'C:\\Users\\dev',
+        existsSync,
+      })).toEqual({
+        path: 'C:\\DeepSky\\deepsky-brochure.html',
         found: false,
       });
     });

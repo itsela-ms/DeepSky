@@ -68,6 +68,34 @@ function resolveAgencyInfo(deps = {}) {
   });
 }
 
+function resolveBrochureInfo(deps = {}) {
+  const existsSync = deps.existsSync || fs.existsSync;
+  const env = deps.env || process.env;
+  const homeDir = deps.homeDir || env.USERPROFILE || env.HOME || '';
+  const documentsPath = deps.documentsPath || '';
+  const appPath = deps.appPath || '';
+  const candidates = [
+    appPath ? path.join(appPath, 'deepsky-brochure.html') : '',
+    documentsPath ? path.join(documentsPath, 'deepsky-brochure.html') : '',
+    homeDir ? path.join(homeDir, 'OneDrive - Microsoft', 'Documents', 'deepsky-brochure.html') : '',
+    homeDir ? path.join(homeDir, 'Documents', 'deepsky-brochure.html') : '',
+  ].filter(Boolean);
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (existsSync(candidate)) {
+      return { path: candidate, found: true };
+    }
+  }
+
+  return {
+    path: candidates[0] || null,
+    found: false,
+  };
+}
+
 function pickNotificationDisplay(displays, mainWindowBounds) {
   if (!Array.isArray(displays) || displays.length === 0) return null;
   if (!mainWindowBounds) return displays[0];
@@ -122,6 +150,7 @@ module.exports = {
   pickNotificationDisplay,
   resolveCommandPath,
   resolveAgencyInfo,
+  resolveBrochureInfo,
   resolveCopilotInfo,
   resolveCopilotPath,
 };

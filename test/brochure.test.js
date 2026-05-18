@@ -125,7 +125,7 @@ describeIfBrochure('Interactive mock reflects features', () => {
   });
 
   it('mock has search input', () => {
-    expect(brochure).toMatch(/mock-search.*Search sessions/i);
+    expect(brochure).toMatch(/mock-search.*Search titles, folders, tags .* resources/i);
   });
 
   it('mock has session status badges (Working, Waiting, Idle)', () => {
@@ -188,6 +188,18 @@ describeIfBrochure('Keyboard shortcuts section', () => {
       expect(brochure).toContain(shortcut);
     });
   }
+});
+
+describeIfBrochure('About section link', () => {
+  it('links to an About and changelog section from the hero area', () => {
+    expect(brochure).toContain('href="#about-section"');
+  });
+
+  it('includes an About and changelog section', () => {
+    expect(brochure).toContain('id="about-section"');
+    expect(brochure).toMatch(/About\s*&amp;\s*Changelog/i);
+    expect(brochure).toMatch(/Settings\s*&rarr;\s*About/i);
+  });
 });
 
 describeIfBrochure('Prerequisite info', () => {

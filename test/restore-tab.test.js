@@ -1,6 +1,27 @@
 import { describe, it, expect } from 'vitest';
 
-const { popRestorableClosedSession } = require('../src/recently-closed');
+const { rememberRestorableClosedSession, popRestorableClosedSession } = require('../src/recently-closed');
+
+describe('rememberRestorableClosedSession', () => {
+  it('pushes the session id onto the restore stack', () => {
+    const stack = [];
+    rememberRestorableClosedSession(stack, 'session-1');
+    expect(stack).toEqual(['session-1']);
+  });
+
+  it('moves an existing session id to the top instead of duplicating it', () => {
+    const stack = ['session-1', 'session-2', 'session-1'];
+    rememberRestorableClosedSession(stack, 'session-2');
+    expect(stack).toEqual(['session-1', 'session-1', 'session-2']);
+  });
+
+  it('ignores empty session ids', () => {
+    const stack = ['session-1'];
+    rememberRestorableClosedSession(stack, '');
+    rememberRestorableClosedSession(stack, null);
+    expect(stack).toEqual(['session-1']);
+  });
+});
 
 describe('popRestorableClosedSession', () => {
   it('returns the most recent valid session id', () => {

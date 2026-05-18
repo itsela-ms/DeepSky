@@ -41,6 +41,14 @@ async function readWorkspaceYaml(id) {
   return fs.promises.readFile(path.join(tmpDir, id, 'workspace.yaml'), 'utf8');
 }
 
+async function setSessionModifiedTime(id, date) {
+  const dir = path.join(tmpDir, id);
+  const workspacePath = path.join(dir, 'workspace.yaml');
+  const timestamp = date instanceof Date ? date : new Date(date);
+  await fs.promises.utimes(workspacePath, timestamp, timestamp);
+  await fs.promises.utimes(dir, timestamp, timestamp);
+}
+
 describe('SessionService', () => {
   describe('saveCwd', () => {
     it('writes cwd into workspace.yaml', async () => {
@@ -197,6 +205,42 @@ describe('SessionService', () => {
       const sessions = await svc.listSessions();
       const sess = sessions.find(s => s.id === 'title-manual');
       expect(sess.title).toBe('New Workspace Name');
+    });
+  });
+
+  describe('listSessions history scope', () => {
+    it('only returns sessions from the last three months when using history scope', async () => {
+      const recentDate = new Date();
+      recentDate.setDate(recentDate.getDate() - 14);
+      const oldDate = new Date();
+      oldDate.setMonth(oldDate.getMonth() - 4);
+
+      await createSession('history-recent', 'summary: recent history');
+      await createSession('history-old', 'summary: old history');
+      await setSessionModifiedTime('history-recent', recentDate);
+      await setSessionModifiedTime('history-old', oldDate);
+
+      const sessions = await svc.listSessions({ scope: 'history' });
+      expect(sessions.map(session => session.id)).toContain('history-recent');
+      expect(sessions.map(session => session.id)).not.toContain('history-old');
+    });
+
+    it('caps history scope to the newest 500 sessions', async () => {
+      const recentBase = new Date();
+      recentBase.setDate(recentBase.getDate() - 7);
+
+      for (let index = 0; index < 505; index += 1) {
+        const id = `history-cap-${String(index).padStart(3, '0')}`;
+        await createSession(id, `summary: capped history ${index}`);
+        const modifiedAt = new Date(recentBase.getTime() + index * 1000);
+        await setSessionModifiedTime(id, modifiedAt);
+      }
+
+      const sessions = await svc.listSessions({ scope: 'history' });
+      expect(sessions).toHaveLength(500);
+      expect(sessions[0].id).toBe('history-cap-504');
+      expect(sessions.at(-1).id).toBe('history-cap-005');
+      expect(sessions.map(session => session.id)).not.toContain('history-cap-004');
     });
   });
 

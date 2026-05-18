@@ -17,6 +17,45 @@ function getShortcutKey(e) {
   return k.length === 1 ? k.toLowerCase() : k;
 }
 
+function getGlobalShortcutAction(e, context = {}) {
+  const mod = e.ctrlKey || e.metaKey;
+  const key = e.key || '';
+  const lowerKey = getShortcutKey(e);
+  const activeElement = context.activeElement || null;
+  const isXterm = !!activeElement?.classList?.contains('xterm-helper-textarea');
+  const isPlainTextInput = !isXterm && (activeElement?.tagName === 'INPUT' || activeElement?.tagName === 'TEXTAREA');
+
+  if (mod && !e.shiftKey && (lowerKey === 'n' || lowerKey === 't')) {
+    return { type: 'new-session' };
+  }
+  if (mod && (key === '=' || key === '+')) {
+    return { type: 'zoom', direction: 'in' };
+  }
+  if (mod && key === '-') {
+    return { type: 'zoom', direction: 'out' };
+  }
+  if (mod && key === '0') {
+    return { type: 'zoom', direction: 'reset' };
+  }
+  if (e.ctrlKey && key === 'Tab') {
+    return { type: 'switch-tab', direction: e.shiftKey ? -1 : 1 };
+  }
+  if (mod && lowerKey === 'w') {
+    return isPlainTextInput ? null : { type: 'close-tab' };
+  }
+  if (mod && e.shiftKey && lowerKey === 't') {
+    return { type: 'restore-tab' };
+  }
+  if (mod && lowerKey === 'i') {
+    return { type: 'toggle-status' };
+  }
+  if (mod && !e.shiftKey && lowerKey === 'f') {
+    return { type: context.hasActiveSession ? 'session-search' : 'sidebar-search' };
+  }
+
+  return null;
+}
+
 /**
  * Creates the xterm custom key event handler for a terminal session.
  *
@@ -98,4 +137,4 @@ function createTerminalKeyHandler(sessionId, terminal, api, hooks = {}) {
   };
 }
 
-module.exports = { createTerminalKeyHandler, getShortcutKey };
+module.exports = { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey };

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-const { createTerminalKeyHandler, getShortcutKey } = require('../src/keyboard-shortcuts');
+const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey } = require('../src/keyboard-shortcuts');
 
 /** Build a minimal synthetic keydown event. */
 function key(overrides = {}) {
   return {
     type: 'keydown',
     key: '',
+    code: '',
     ctrlKey: false,
     metaKey: false,
     shiftKey: false,
@@ -367,5 +368,73 @@ describe('getShortcutKey', () => {
   it('does not treat non-letter codes (e.g. Digit1, F1) as letters', () => {
     expect(getShortcutKey({ code: 'Digit1', key: '1' })).toBe('1');
     expect(getShortcutKey({ code: 'F1', key: 'F1' })).toBe('F1');
+  });
+});
+
+describe('getGlobalShortcutAction', () => {
+  const plainInput = { tagName: 'INPUT', classList: { contains: () => false } };
+  const plainTextarea = { tagName: 'TEXTAREA', classList: { contains: () => false } };
+  const xtermTextarea = { tagName: 'TEXTAREA', classList: { contains: (name) => name === 'xterm-helper-textarea' } };
+
+  it('maps Ctrl+N and Ctrl+T to new-session', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'n', code: 'KeyN' }))).toEqual({ type: 'new-session' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 't', code: 'KeyT' }))).toEqual({ type: 'new-session' });
+  });
+
+  it('maps zoom shortcuts', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: '=' }))).toEqual({ type: 'zoom', direction: 'in' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: '+' }))).toEqual({ type: 'zoom', direction: 'in' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: '-' }))).toEqual({ type: 'zoom', direction: 'out' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: '0' }))).toEqual({ type: 'zoom', direction: 'reset' });
+  });
+
+  it('maps Ctrl+Tab and Ctrl+Shift+Tab to tab switching', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'Tab' }))).toEqual({ type: 'switch-tab', direction: 1 });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, shiftKey: true, key: 'Tab' }))).toEqual({ type: 'switch-tab', direction: -1 });
+  });
+
+  it('maps Ctrl+Shift+T to restore-tab', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, shiftKey: true, key: 't', code: 'KeyT' }))).toEqual({ type: 'restore-tab' });
+  });
+
+  it('maps Ctrl+I to toggle-status', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'i', code: 'KeyI' }))).toEqual({ type: 'toggle-status' });
+  });
+
+  it('maps Ctrl+F based on active-session presence', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'f', code: 'KeyF' }), { hasActiveSession: true }))
+      .toEqual({ type: 'session-search' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'f', code: 'KeyF' }), { hasActiveSession: false }))
+      .toEqual({ type: 'sidebar-search' });
+  });
+
+  it('ignores Ctrl+W when typing in a plain input or textarea', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'w', code: 'KeyW' }), { activeElement: plainInput })).toBeNull();
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'w', code: 'KeyW' }), { activeElement: plainTextarea })).toBeNull();
+  });
+
+  it('still maps Ctrl+W when focus is in xterm helper textarea', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'w', code: 'KeyW' }), { activeElement: xtermTextarea }))
+      .toEqual({ type: 'close-tab' });
+  });
+
+  it('supports Meta shortcuts on macOS', () => {
+    expect(getGlobalShortcutAction(key({ metaKey: true, key: 't', code: 'KeyT' }))).toEqual({ type: 'new-session' });
+    expect(getGlobalShortcutAction(key({ metaKey: true, shiftKey: true, key: 't', code: 'KeyT' }))).toEqual({ type: 'restore-tab' });
+    expect(getGlobalShortcutAction(key({ metaKey: true, key: 'i', code: 'KeyI' }))).toEqual({ type: 'toggle-status' });
+  });
+
+  it('supports non-Latin layouts via physical key codes', () => {
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, shiftKey: true, key: 'א', code: 'KeyT' })))
+      .toEqual({ type: 'restore-tab' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'מ', code: 'KeyN' })))
+      .toEqual({ type: 'new-session' });
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'כ', code: 'KeyF' }), { hasActiveSession: false }))
+      .toEqual({ type: 'sidebar-search' });
+  });
+
+  it('returns null for unrelated keys', () => {
+    expect(getGlobalShortcutAction(key({ key: 'a' }))).toBeNull();
+    expect(getGlobalShortcutAction(key({ ctrlKey: true, key: 'Enter' }))).toBeNull();
   });
 });

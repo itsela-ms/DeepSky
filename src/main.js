@@ -11,12 +11,18 @@ const StatusService = require('./status-service');
 const SettingsService = require('./settings-service');
 const NotificationService = require('./notification-service');
 const UpdateService = require('./update-service');
-const { resolveGeneratedFilePath, resolveSessionDirectory, resolveSessionFilesDirectory } = require('./session-paths');
+const {
+  getSessionDirectoryAvailability,
+  resolveGeneratedFilePath,
+  resolveSessionDirectory,
+  resolveSessionFilesDirectory,
+} = require('./session-paths');
 const {
   calculateNotificationPosition,
   isValidSessionId,
   pickNotificationDisplay,
   resolveAgencyInfo,
+  resolveBrochureInfo,
   resolveCopilotInfo,
   resolveCopilotPath,
 } = require('./app-support');
@@ -27,6 +33,7 @@ app.commandLine.appendSwitch('disable-gpu-compositing');
 
 let mainWindow;
 let updateService;
+let lastRestoreTabShortcutAt = 0;
 
 // Active notification popup windows, used for stacking
 let activeNotifWindows = [];
@@ -125,6 +132,20 @@ function getAugmentedSettings(settings) {
   };
 }
 
+function dispatchRestoreTabShortcut() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastRestoreTabShortcutAt < 150) {
+    return;
+  }
+
+  lastRestoreTabShortcutAt = now;
+  mainWindow.webContents.send('shortcut:restore-tab');
+}
+
 function createWindow() {
   const theme = settingsService.get().theme || 'mocha';
   const bg = theme === 'latte' ? '#eff1f5' : '#1e1e2e';
@@ -156,6 +177,13 @@ function createWindow() {
   const zoomFactor = settingsService.get().zoomFactor || 1.0;
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.setZoomFactor(zoomFactor);
+  });
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    const key = String(input.key || '').toLowerCase();
+    const isRestoreShortcut = (input.control || input.meta) && input.shift && (input.code === 'KeyT' || key === 't');
+    if (!isRestoreShortcut || input.type !== 'keyDown') return;
+    event.preventDefault();
+    dispatchRestoreTabShortcut();
   });
 
   mainWindow.webContents.on('will-navigate', (e) => e.preventDefault());
@@ -215,7 +243,18 @@ if (!hasSingleInstanceLock) {
   // interferes with xterm's canvas-based selection model.
   const menuTemplate = [];
   menuTemplate.push(
-    { label: 'Edit', submenu: [{ role: 'selectAll' }] },
+    {
+      label: 'Edit',
+      submenu: [
+        {
+          label: 'Restore Closed Tab',
+          accelerator: 'CommandOrControl+Shift+T',
+          click: () => dispatchRestoreTabShortcut(),
+        },
+        { type: 'separator' },
+        { role: 'selectAll' },
+      ]
+    },
     { label: 'View', submenu: [{ role: 'toggleDevTools' }, { role: 'reload' }, { role: 'forceReload' }] },
   );
   Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate));
@@ -513,6 +552,25 @@ if (!hasSingleInstanceLock) {
     }
     return '';
   });
+  ipcMain.handle('app:getBrochureAvailability', () => {
+    const brochureInfo = resolveBrochureInfo({
+      appPath: app.getAppPath(),
+      documentsPath: app.getPath('documents'),
+    });
+    return { available: brochureInfo.found };
+  });
+  ipcMain.handle('app:openBrochure', async () => {
+    const brochureInfo = resolveBrochureInfo({
+      appPath: app.getAppPath(),
+      documentsPath: app.getPath('documents'),
+    });
+    if (!brochureInfo.found || !brochureInfo.path) {
+      return { ok: false, error: 'DeepSky brochure was not found on this machine.' };
+    }
+
+    const error = await shell.openPath(brochureInfo.path);
+    return error ? { ok: false, error } : { ok: true };
+  });
 
   // Auto-notify on session exit
   ptyManager.on('exit', (sessionId, exitCode) => {
@@ -545,6 +603,17 @@ if (!hasSingleInstanceLock) {
   });
 
   let allSessionsCache = [];
+  const mergeSessionsCache = (sessions) => {
+    const merged = new Map(allSessionsCache.map(session => [session.id, session]));
+    sessions.forEach(session => merged.set(session.id, session));
+    allSessionsCache = [...merged.values()];
+  };
+  const normalizeSessionListScope = (options = {}) => {
+    const scope = String(options?.scope || '').trim().toLowerCase();
+    if (scope === 'history') return 'history';
+    if (scope === 'all') return 'all';
+    return 'active';
+  };
   const sessionMatchesSidebarSearch = (session, query) => {
     if (session.title?.toLowerCase().includes(query)) return true;
     if (session.cwd?.toLowerCase().includes(query)) return true;
@@ -560,14 +629,24 @@ if (!hasSingleInstanceLock) {
     return false;
   };
 
-  const hydrateSessionsCache = async () => {
-    const sessions = await sessionService.listSessions();
-    allSessionsCache = sessions.map(s => ({
+  const hydrateSessionsCache = async (options = {}) => {
+    const scope = normalizeSessionListScope(options);
+    const sessions = await sessionService.listSessions(
+      scope === 'history' ? { scope: 'history' } : scope === 'all' ? { scope: 'all' } : undefined
+    );
+    const hydratedSessions = sessions.map(s => ({
       ...s,
       tags: tagIndexer.getTagsForSession(s.id),
       resources: resourceIndexer.getResourcesForSession(s.id)
     }));
-    return allSessionsCache;
+
+    if (scope === 'history') {
+      mergeSessionsCache(hydratedSessions);
+      return hydratedSessions;
+    }
+
+    allSessionsCache = hydratedSessions;
+    return hydratedSessions;
   };
 
   // IPC: Get session list (with tags and resources) — also caches for notification titles
@@ -627,6 +706,10 @@ if (!hasSingleInstanceLock) {
     sessionId = requireValidSessionId(sessionId);
     return statusService.getSessionStatus(sessionId);
   });
+
+  ipcMain.handle('session:getDirectoryAvailability', async (event, sessionId) => (
+    getSessionDirectoryAvailability(SESSION_STATE_DIR, sessionId)
+  ));
 
   ipcMain.handle('session:openDirectory', async (event, sessionId) => {
     try {

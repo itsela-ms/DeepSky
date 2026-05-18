@@ -2,21 +2,30 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar } = require('./session-state');
-const { createTerminalKeyHandler, getShortcutKey } = require('./keyboard-shortcuts');
+const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
 const { resolveSidebarDragWidth } = require('./sidebar-resize');
-const { popRestorableClosedSession } = require('./recently-closed');
+const { rememberRestorableClosedSession, popRestorableClosedSession } = require('./recently-closed');
+const { pruneSessionFromGroups } = require('./tab-groups');
 const { shouldApplyStatusPanelUpdate } = require('./status-panel-state');
 const { getInitialSidebarState, getNextSidebarVisibilityState } = require('./sidebar-preferences');
 const { processSessionInput, isMetadataRefreshCommand, extractMetadataCommand } = require('./session-input-tracker');
 const { trapFocusWithin, isBackdropClickTarget } = require('./modal-utils');
 const { renderDiffPreviewHtml } = require('./status-diff-preview');
 const { renderStatusSummaryMetaHtml } = require('./status-summary');
+const {
+  getHistoryEmptyState,
+  getHistoryScopeActionLabel,
+  getHistoryScopeStatusNotice,
+} = require('./history-limit');
+const { getRecentChangelogReleases } = require('./changelog-utils');
+const { createStartupLoadingController } = require('./startup-loading');
 
 // State
 const terminals = new Map();
 const sessionBusyState = new Map(); // sessionId → boolean (has recent pty output)
 const sessionAliveState = new Set(); // sessionIds with live pty processes
+const openTabIds = new Set(); // sessionIds currently shown in the tab strip
 let activeSessionId = null;
 let allSessions = [];
 let searchQuery = '';
@@ -30,12 +39,9 @@ const recentlyClosedSessions = []; // stack of session IDs closed by the user
 const sessionLastUsed = new Map();
 let creatingSession = false;
 const ipcCleanups = []; // unsubscribe fns for IPC listeners
-let sidebarSearchResultIds = null;
-let sidebarSearchLoading = false;
-let sidebarSearchTimer = null;
-let sidebarSearchRequestSeq = 0;
 let sessionListRenderSeq = 0;
 let activeSessionRenameId = null;
+let activeGroupRenameId = null;
 let pendingSessionListRender = false;
 let sidebarCollapsed = false;
 let sidebarHidden = false;
@@ -46,6 +52,7 @@ let lastFocusedElementBeforeSettings = null;
 const sessionPromptGhostState = new Map();
 let statusDiffPopover = null;
 let statusDiffHideTimer = null;
+let historyShowsAll = false;
 
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 450;
@@ -54,6 +61,8 @@ const SIDEBAR_COLLAPSED_WIDTH = 68;
 // Tab group state
 let tabGroups = []; // Array of { id, name, color, collapsed, tabIds }
 let sessionOrder = []; // Manual ordering of active session IDs in sidebar
+const ABOUT_CHANGELOG_URL = 'https://github.com/itsela-ms/DeepSky/blob/main/CHANGELOG.md';
+const ABOUT_CHANGELOG_RELEASE_LIMIT = 3;
 const GROUP_COLORS = [
   { name: 'Grey', value: '#585b70' },
   { name: 'Blue', value: '#89b4fa' },
@@ -67,8 +76,13 @@ const GROUP_COLORS = [
 let nextGroupColorIdx = 0;
 
 function saveTabState() {
-  const openTabs = [...terminals.keys()];
-  window.api.updateSettings({ openTabs, activeTab: activeSessionId, tabGroups, sessionOrder });
+  const openTabs = [...openTabIds];
+  const activeSessions = [...sessionAliveState];
+  window.api.updateSettings({ openTabs, activeSessions, activeTab: activeSessionId, tabGroups, sessionOrder });
+}
+
+function isSessionListRenderLocked() {
+  return !!(activeSessionRenameId || activeGroupRenameId);
 }
 
 // Theme palettes for xterm.js
@@ -130,9 +144,20 @@ const btnToggleStatus = document.getElementById('btn-toggle-status');
 const notificationBadge = document.getElementById('notification-badge');
 const notificationPanel = document.getElementById('notification-panel');
 const notificationListEl = document.getElementById('notification-list');
+const aboutVersionEl = document.getElementById('about-version');
+const aboutVersionTabEl = document.getElementById('about-version-tab');
+const aboutReleaseMetaEl = document.getElementById('about-release-meta');
+const aboutChangelogEl = document.getElementById('about-changelog');
+const aboutOpenBrochureBtn = document.getElementById('about-open-brochure');
+const aboutOpenChangelogBtn = document.getElementById('about-open-changelog');
 const feedbackPanel = document.getElementById('feedback-panel');
 const toastContainer = document.getElementById('toast-container');
 const notificationLiveRegion = document.getElementById('notification-live-region');
+const startupLoading = createStartupLoadingController({
+  screen: document.getElementById('startup-loading-screen'),
+  title: document.getElementById('startup-loading-title'),
+  message: document.getElementById('startup-loading-message'),
+});
 const autoUpdateToggle = document.getElementById('auto-update-enabled');
 const betaChannelToggle = document.getElementById('beta-channel');
 const betaChannelLabel = document.getElementById('beta-channel-label');
@@ -201,6 +226,14 @@ function updateAgencyAvailabilityState(agencyAvailable, requestedValue = false) 
     agencyLauncherDesc.textContent = available
       ? DEFAULT_AGENCY_LAUNCHER_TEXT
       : 'Agency is not installed on this machine, so DeepSky will keep using the default Copilot CLI command.';
+  }
+}
+
+async function restoreMostRecentClosedTab() {
+  const validIds = await getAllValidSessionIds();
+  const sessionId = popRestorableClosedSession(recentlyClosedSessions, validIds);
+  if (sessionId) {
+    await openSession(sessionId);
   }
 }
 
@@ -511,35 +544,46 @@ function matchesSidebarMetadata(session, queryLower) {
   return false;
 }
 
-function queueSidebarSearch(query) {
-  if (sidebarSearchTimer) clearTimeout(sidebarSearchTimer);
-  const needle = query.trim();
-  const requestId = ++sidebarSearchRequestSeq;
+function ensureSessionPlaceholder(sessionId, fallback = {}) {
+  let session = allSessions.find(existing => existing.id === sessionId);
+  if (session) return session;
 
-  if (!needle) {
-    sidebarSearchLoading = false;
-    sidebarSearchResultIds = null;
-    renderSessionList();
-    return;
+  session = {
+    id: sessionId,
+    title: fallback.title || sessionId.substring(0, 8),
+    cwd: fallback.cwd || '',
+    updatedAt: new Date().toISOString(),
+    tags: [],
+    resources: []
+  };
+  allSessions.unshift(session);
+  return session;
+}
+
+function appendHistoryScopeNotice() {
+  if (currentSidebarTab !== 'history' || sidebarCollapsed) return;
+  const noticeEl = document.createElement('div');
+  noticeEl.className = 'history-scope-note';
+
+  const copyEl = document.createElement('div');
+  copyEl.className = 'history-scope-note-copy';
+  copyEl.textContent = getHistoryScopeStatusNotice(historyShowsAll);
+
+  const actionEl = document.createElement('button');
+  actionEl.type = 'button';
+  actionEl.className = 'history-scope-action';
+  actionEl.textContent = getHistoryScopeActionLabel(historyShowsAll);
+
+  noticeEl.appendChild(copyEl);
+  noticeEl.appendChild(actionEl);
+  sessionList.appendChild(noticeEl);
+}
+
+function getSidebarSessionScope() {
+  if (currentSidebarTab === 'history') {
+    return historyShowsAll ? 'all' : 'history';
   }
-
-  sidebarSearchLoading = true;
-  renderSessionList();
-  sidebarSearchTimer = setTimeout(async () => {
-    try {
-      const results = await window.api.searchSessions(needle);
-      if (requestId !== sidebarSearchRequestSeq) return;
-      sidebarSearchResultIds = new Set(results.map(result => result.id));
-    } catch {
-      if (requestId !== sidebarSearchRequestSeq) return;
-      sidebarSearchResultIds = null;
-    } finally {
-      if (requestId === sidebarSearchRequestSeq) {
-        sidebarSearchLoading = false;
-        renderSessionList();
-      }
-    }
-  }, 120);
+  return currentSidebarTab;
 }
 
 function syncSidebarCollapsedUi() {
@@ -625,11 +669,18 @@ function focusSidebarSearch() {
 let _titleClickTimeout = null;
 let _titleClickSessionId = null;
 sessionList.addEventListener('click', (e) => {
+  const historyScopeAction = e.target.closest('.history-scope-action');
+  if (historyScopeAction) {
+    e.stopPropagation();
+    historyShowsAll = !historyShowsAll;
+    void refreshSessionList();
+    return;
+  }
   const closeBtn = e.target.closest('.session-close');
   if (closeBtn) {
     e.stopPropagation();
     const item = closeBtn.closest('.session-item');
-    if (item) closeTab(item.dataset.sessionId);
+    if (item) terminateSession(item.dataset.sessionId, { rememberClosedTab: true });
     return;
   }
   const deleteBtn = e.target.closest('.session-delete');
@@ -706,6 +757,10 @@ sessionList.addEventListener('keydown', (e) => {
 
 // Initialize
 async function init() {
+  startupLoading.setStatus({
+    titleText: 'Starting DeepSky...',
+    messageText: 'Loading settings...',
+  });
   const settings = await window.api.getSettings();
   applySettingsToControls(settings, { includeSidebar: true });
 
@@ -717,6 +772,10 @@ async function init() {
     });
   }
 
+  startupLoading.setStatus({
+    titleText: 'Loading sessions...',
+    messageText: 'Preparing your sidebar and saved session history...',
+  });
   await refreshSessionList();
 
   // Clean up any previous IPC listeners (guards against double-init on reload)
@@ -732,6 +791,9 @@ async function init() {
     sessionAliveState.add(sessionId);
     sessionBusyState.set(sessionId, true);
     patchSessionStateBadges();
+  }));
+  ipcCleanups.push(window.api.onRestoreTabShortcut(() => {
+    void restoreMostRecentClosedTab();
   }));
 
   ipcCleanups.push(window.api.onPtyExit((sessionId, exitCode) => {
@@ -752,9 +814,7 @@ async function init() {
           e.terminal.dispose();
           e.wrapper.remove();
           terminals.delete(sessionId);
-          const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
-          if (tab) tab.remove();
-          updateTabScrollButtons();
+          removeTabUi(sessionId);
           if (activeSessionId === sessionId) {
             activeSessionId = null;
             updateSessionPromptGhost(null);
@@ -788,9 +848,7 @@ async function init() {
       entry.wrapper.remove();
       terminals.delete(sessionId);
     }
-    const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
-    if (tab) tab.remove();
-    updateTabScrollButtons();
+    removeTabUi(sessionId);
     if (activeSessionId === sessionId) {
       activeSessionId = null;
       updateSessionPromptGhost(null);
@@ -819,7 +877,7 @@ async function init() {
       currentSidebarTab = tab.dataset.tab;
       document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      renderSessionList();
+      void refreshSessionList();
       window.api.updateSettings({ lastActiveTab: currentSidebarTab });
     });
   });
@@ -982,11 +1040,27 @@ async function init() {
     }
   }));
 
+  startupLoading.setStatus({
+    titleText: 'Loading notifications...',
+    messageText: 'Syncing alerts and startup status...',
+  });
   await refreshNotifications();
+
+  startupLoading.setStatus({
+    titleText: 'Restoring workspace...',
+    messageText: 'Reopening live sessions and previously open tabs...',
+  });
+  const validIds = await getAllValidSessionIds();
+
+  // Restore previously active sessions without forcing them into tabs.
+  if (Array.isArray(settings.activeSessions) && settings.activeSessions.length > 0) {
+    const activeSessionsToRestore = settings.activeSessions.filter(id => validIds.has(id));
+    await Promise.allSettled(activeSessionsToRestore.map(id => window.api.openSession(id)));
+    await updateSessionBusyStates();
+  }
 
   // Restore previously open tabs
   if (settings.openTabs && settings.openTabs.length > 0) {
-    const validIds = new Set(allSessions.map(s => s.id));
     const tabsToRestore = settings.openTabs.filter(id => validIds.has(id));
     await Promise.allSettled(tabsToRestore.map(id => openSession(id)));
 
@@ -994,28 +1068,35 @@ async function init() {
     if (Array.isArray(settings.tabGroups) && settings.tabGroups.length > 0) {
       tabGroups = settings.tabGroups.filter(g =>
         g && typeof g.id === 'string' && typeof g.name === 'string' &&
-        Array.isArray(g.tabIds) && g.tabIds.some(id => terminals.has(id))
+        Array.isArray(g.tabIds) && g.tabIds.some(id => openTabIds.has(id))
       ).map(g => ({
         id: g.id,
         name: (g.name || 'Group').substring(0, 50),
         color: g.color || GROUP_COLORS[0].value,
         collapsed: !!g.collapsed,
-        tabIds: g.tabIds.filter(id => terminals.has(id)),
+        tabIds: g.tabIds.filter(id => openTabIds.has(id)),
       }));
     }
 
     // Restore session order
     if (Array.isArray(settings.sessionOrder) && settings.sessionOrder.length > 0) {
-      sessionOrder = settings.sessionOrder.filter(id => terminals.has(id));
+      sessionOrder = settings.sessionOrder.filter(id => sessionAliveState.has(id));
     }
 
     renderSessionList();
 
     // Switch to the previously active tab
-    if (settings.activeTab && terminals.has(settings.activeTab)) {
+    if (settings.activeTab && openTabIds.has(settings.activeTab)) {
       switchToSession(settings.activeTab);
     }
+  } else {
+    renderSessionList();
   }
+
+  startupLoading.setStatus({
+    titleText: 'Finishing startup...',
+    messageText: 'DeepSky is almost ready.',
+  });
 }
 
 function applyTheme(theme) {
@@ -1053,14 +1134,159 @@ settingsOverlay.querySelectorAll('.settings-tab').forEach(tab => {
   });
 });
 
+aboutOpenChangelogBtn?.addEventListener('click', () => {
+  window.api.openExternal(ABOUT_CHANGELOG_URL);
+});
+
+aboutOpenBrochureBtn?.addEventListener('click', async () => {
+  const result = await window.api.openBrochure();
+  if (!result?.ok) {
+    showToast({
+      type: 'error',
+      title: 'Could not open brochure',
+      body: result?.error || 'DeepSky brochure was not found on this machine.',
+    });
+  }
+});
+
+function appendInlineMarkdown(target, text) {
+  const tokens = String(text || '')
+    .split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g)
+    .filter(Boolean);
+
+  if (!tokens.length) {
+    target.textContent = text || '';
+    return;
+  }
+
+  for (const token of tokens) {
+    const strongMatch = token.match(/^\*\*(.+)\*\*$/);
+    if (strongMatch) {
+      const strong = document.createElement('strong');
+      strong.textContent = strongMatch[1];
+      target.appendChild(strong);
+      continue;
+    }
+
+    const codeMatch = token.match(/^`(.+)`$/);
+    if (codeMatch) {
+      const code = document.createElement('code');
+      code.textContent = codeMatch[1];
+      target.appendChild(code);
+      continue;
+    }
+
+    const linkMatch = token.match(/^\[([^\]]+)\]\([^)]+\)$/);
+    target.appendChild(document.createTextNode(linkMatch ? linkMatch[1] : token));
+  }
+}
+
+function createAboutReleaseCard(release, currentVersion) {
+  const isCurrentBuild = release.version === currentVersion;
+  const card = document.createElement('section');
+  card.className = 'about-release-card';
+  if (isCurrentBuild) {
+    card.classList.add('current');
+  }
+
+  const header = document.createElement('div');
+  header.className = 'about-release-header';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'about-release-title-row';
+
+  const versionEl = document.createElement('div');
+  versionEl.className = 'about-release-version';
+  versionEl.textContent = release.version;
+  titleRow.appendChild(versionEl);
+
+  if (isCurrentBuild) {
+    const badge = document.createElement('span');
+    badge.className = 'about-release-badge';
+    badge.textContent = 'Current build';
+    titleRow.appendChild(badge);
+  }
+
+  const dateEl = document.createElement('div');
+  dateEl.className = 'about-release-date';
+  dateEl.textContent = release.date;
+
+  header.appendChild(titleRow);
+  header.appendChild(dateEl);
+  card.appendChild(header);
+
+  for (const section of release.sections) {
+    if (!section.items.length) {
+      continue;
+    }
+
+    const sectionEl = document.createElement('div');
+    sectionEl.className = 'about-release-section';
+
+    const sectionTitle = document.createElement('div');
+    sectionTitle.className = 'about-release-section-title';
+    sectionTitle.textContent = section.title;
+    sectionEl.appendChild(sectionTitle);
+
+    const list = document.createElement('ul');
+    list.className = 'about-release-list';
+
+    for (const item of section.items) {
+      const listItem = document.createElement('li');
+      appendInlineMarkdown(listItem, item);
+      list.appendChild(listItem);
+    }
+
+    sectionEl.appendChild(list);
+    card.appendChild(sectionEl);
+  }
+
+  return card;
+}
+
+function renderAboutChangelog(changelog, version) {
+  if (!aboutChangelogEl) {
+    return;
+  }
+
+  aboutChangelogEl.replaceChildren();
+  const releases = getRecentChangelogReleases(changelog, ABOUT_CHANGELOG_RELEASE_LIMIT);
+
+  if (aboutReleaseMetaEl) {
+    if (!releases.length) {
+      aboutReleaseMetaEl.textContent = `App version v${version}`;
+    } else {
+      aboutReleaseMetaEl.textContent =
+        `App version v${version} - showing the latest ${releases.length} changelog entr${releases.length === 1 ? 'y' : 'ies'}.`;
+    }
+  }
+
+  if (!releases.length) {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'about-changelog-empty';
+    emptyState.textContent = 'No changelog available.';
+    aboutChangelogEl.appendChild(emptyState);
+    return;
+  }
+
+  for (const release of releases) {
+    aboutChangelogEl.appendChild(createAboutReleaseCard(release, version));
+  }
+}
+
 async function populateAboutSection() {
   const version = await window.api.getVersion();
   const changelog = await window.api.getChangelog();
-  document.getElementById('about-version').textContent = `v${version}`;
-  const aboutVersionTab = document.getElementById('about-version-tab');
-  if (aboutVersionTab) aboutVersionTab.textContent = `DeepSky v${version}`;
-  const changelogEl = document.getElementById('about-changelog');
-  changelogEl.textContent = changelog || 'No changelog available.';
+  const brochureAvailability = await window.api.getBrochureAvailability();
+  if (aboutVersionEl) aboutVersionEl.textContent = `v${version}`;
+  if (aboutVersionTabEl) aboutVersionTabEl.textContent = `DeepSky v${version}`;
+  if (aboutOpenBrochureBtn) {
+    aboutOpenBrochureBtn.disabled = !brochureAvailability?.available;
+    aboutOpenBrochureBtn.title = brochureAvailability?.available
+      ? 'Open the DeepSky brochure'
+      : 'DeepSky brochure was not found on this machine.';
+  }
+  renderAboutChangelog(changelog, version);
 
   // Restore current update status
   const updateData = await window.api.getUpdateStatus();
@@ -1198,7 +1424,7 @@ function showStatusDiffPopover(anchorEl, diffText) {
 }
 
 async function refreshSessionList() {
-  allSessions = await window.api.listSessions();
+  allSessions = await window.api.listSessions({ scope: getSidebarSessionScope() });
   const validIds = new Set([...allSessions.map(s => s.id), ...terminals.keys()]);
   for (const session of allSessions) {
     if (terminals.has(session.id)) {
@@ -1210,10 +1436,18 @@ async function refreshSessionList() {
     if (!validIds.has(id)) sessionLastUsed.delete(id);
   }
   await updateSessionBusyStates();
-  if (searchQuery) queueSidebarSearch(searchQuery);
   scheduleRenderSessionList();
   updateSessionPromptGhost(activeSessionId);
   if (!activeSessionId) emptyState.classList.remove('hidden');
+}
+
+async function getAllValidSessionIds() {
+  const sessions = await window.api.listSessions({ scope: 'all' });
+  return new Set([
+    ...sessions.map(session => session.id),
+    ...allSessions.map(session => session.id),
+    ...terminals.keys(),
+  ]);
 }
 
 const BUSY_THRESHOLD_MS = 30000;
@@ -1298,7 +1532,7 @@ setInterval(pollSessionStatus, STATUS_POLL_MS);
 
 let _renderScheduled = false;
 function scheduleRenderSessionList() {
-  if (activeSessionRenameId) {
+  if (isSessionListRenderLocked()) {
     pendingSessionListRender = true;
     return;
   }
@@ -1306,7 +1540,7 @@ function scheduleRenderSessionList() {
   _renderScheduled = true;
   requestAnimationFrame(() => {
     _renderScheduled = false;
-    if (activeSessionRenameId) {
+    if (isSessionListRenderLocked()) {
       pendingSessionListRender = true;
       return;
     }
@@ -1434,13 +1668,13 @@ function createSessionItem(session, group, index) {
 }
 
 function renderSessionList() {
-  if (activeSessionRenameId) {
+  if (isSessionListRenderLocked()) {
     pendingSessionListRender = true;
     return;
   }
   pendingSessionListRender = false;
   const renderSeq = ++sessionListRenderSeq;
-  const activeIds = new Set([...terminals.keys()]);
+  const activeIds = new Set(sessionAliveState);
 
   let displayed;
   if (currentSidebarTab === 'active') {
@@ -1449,8 +1683,8 @@ function renderSessionList() {
       activeSessionIds: activeIds,
       currentSidebarTab
     });
-    // Active list is ordered strictly by user placement. New sessions are
-    // appended to sessionOrder in creation order; closed sessions are pruned.
+    // Active list is ordered strictly by user placement. New live sessions are
+    // appended to sessionOrder in creation order; ended sessions are pruned.
     ensureSessionOrder();
     const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
     displayed.sort((a, b) => {
@@ -1470,23 +1704,18 @@ function renderSessionList() {
   // Filter by search (title + tags + resources)
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
-    displayed = displayed.filter(s => {
-      if (matchesSidebarMetadata(s, q)) return true;
-      if (sidebarSearchResultIds && sidebarSearchResultIds.has(s.id)) return true;
-      return false;
-    });
+    displayed = displayed.filter(s => matchesSidebarMetadata(s, q));
   }
 
   sessionList.innerHTML = '';
+  appendHistoryScopeNotice();
 
   if (displayed.length === 0) {
     const emptyEl = document.createElement('div');
     emptyEl.className = 'empty-list';
-      emptyEl.textContent = sidebarSearchLoading
-        ? 'Searching sessions...'
-        : currentSidebarTab === 'active'
-          ? 'No active sessions. Click a session in History or start a new one.'
-          : searchQuery ? 'No sessions match your search.' : 'No completed sessions yet.';
+      emptyEl.textContent = currentSidebarTab === 'active'
+        ? 'No active sessions. Click a session in History or start a new one.'
+        : searchQuery ? 'No sessions match your search.' : getHistoryEmptyState(historyShowsAll);
     sessionList.appendChild(emptyEl);
     return;
   }
@@ -1739,7 +1968,7 @@ function confirmDeleteSession(sessionId, title) {
     cleanup();
     // Close tab if open
     if (terminals.has(sessionId)) {
-      await closeTab(sessionId, { remember: false });
+      await terminateSession(sessionId);
     }
     await window.api.deleteSession(sessionId);
     await refreshSessionList();
@@ -1753,6 +1982,10 @@ function confirmDeleteSession(sessionId, title) {
 async function openSession(sessionId) {
   const existing = terminals.get(sessionId);
   if (existing && !existing.exited) {
+    if (!openTabIds.has(sessionId)) {
+      const session = allSessions.find(s => s.id === sessionId);
+      addTab(sessionId, session?.title || sessionId.substring(0, 8));
+    }
     switchToSession(sessionId);
     await new Promise(resolve => requestAnimationFrame(resolve));
     return;
@@ -1764,6 +1997,7 @@ async function openSession(sessionId) {
     existing.terminal.dispose();
     existing.wrapper.remove();
     terminals.delete(sessionId);
+    openTabIds.delete(sessionId);
     const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
     if (tab) tab.remove();
   }
@@ -1776,7 +2010,7 @@ async function openSession(sessionId) {
     createTerminal(sessionId);
     switchToSession(sessionId);
 
-    const session = allSessions.find(s => s.id === sessionId);
+    const session = ensureSessionPlaceholder(sessionId);
     addTab(sessionId, session?.title || sessionId.substring(0, 8));
     renderSessionList();
     saveTabState();
@@ -1819,9 +2053,7 @@ async function newSession() {
     addTab(sessionId, 'New Session');
 
     // Inject placeholder so the active list renders immediately
-    if (!allSessions.find(s => s.id === sessionId)) {
-      allSessions.unshift({ id: sessionId, title: 'New Session', cwd: cwd || '', updatedAt: new Date().toISOString(), tags: [], resources: [] });
-    }
+    ensureSessionPlaceholder(sessionId, { title: 'New Session', cwd: cwd || '' });
 
     currentSidebarTab = 'active';
     document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'active'));
@@ -1941,6 +2173,7 @@ function switchToSession(sessionId) {
   if (currentSidebarTab !== 'active') {
     currentSidebarTab = 'active';
     document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'active'));
+    void refreshSessionList();
   }
 
   const entry = terminals.get(sessionId);
@@ -1997,6 +2230,7 @@ function showHome() {
 
 function addTab(sessionId, title) {
   if (document.querySelector(`.tab[data-session-id="${sessionId}"]`)) return;
+  openTabIds.add(sessionId);
 
   const tab = document.createElement('div');
   tab.className = 'tab active';
@@ -2045,11 +2279,44 @@ function updateTabScrollButtons() {
   tabScrollRight.classList.toggle('visible', overflows && el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
 }
 
-async function closeTab(sessionId, { remember = true } = {}) {
-  await window.api.killSession(sessionId);
+function removeTabUi(sessionId) {
+  openTabIds.delete(sessionId);
+  const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
+  if (tab) tab.remove();
+  updateTabScrollButtons();
+}
 
+async function closeTab(sessionId, { remember = true } = {}) {
   // Remember for Ctrl+Shift+T restore
-  if (remember) recentlyClosedSessions.push(sessionId);
+  if (remember) rememberRestorableClosedSession(recentlyClosedSessions, sessionId);
+  removeTabUi(sessionId);
+
+  if (activeSessionId === sessionId) {
+    const entry = terminals.get(sessionId);
+    if (entry) entry.wrapper.classList.remove('visible');
+    activeSessionId = null;
+    updateSessionPromptGhost(null);
+    const remainingTabs = [...document.querySelectorAll('.tab')];
+    if (remainingTabs.length > 0) {
+      switchToSession(remainingTabs[remainingTabs.length - 1].dataset.sessionId);
+    } else {
+      closeSessionSearch({ restoreTerminalFocus: false });
+      emptyState.classList.remove('hidden');
+      updateStatusPanel(null);
+    }
+  }
+
+  renderSessionList();
+  saveTabState();
+}
+
+async function terminateSession(sessionId, { rememberClosedTab = false } = {}) {
+  if (rememberClosedTab && openTabIds.has(sessionId)) {
+    ensureSessionPlaceholder(sessionId);
+    rememberRestorableClosedSession(recentlyClosedSessions, sessionId);
+  }
+
+  await window.api.killSession(sessionId);
 
   const entry = terminals.get(sessionId);
   if (entry) {
@@ -2059,32 +2326,18 @@ async function closeTab(sessionId, { remember = true } = {}) {
     entry.wrapper.remove();
     terminals.delete(sessionId);
   }
+
+  removeTabUi(sessionId);
+  tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
   sessionAliveState.delete(sessionId);
   sessionBusyState.delete(sessionId);
   sessionIdleCount.delete(sessionId);
-  sessionLastUsed.delete(sessionId);
   cwdChangingSessions.delete(sessionId);
-
-  // Remove from any tab group
-  for (const group of tabGroups) {
-    const idx = group.tabIds.indexOf(sessionId);
-    if (idx !== -1) {
-      group.tabIds.splice(idx, 1);
-      if (group.tabIds.length === 0) {
-        tabGroups = tabGroups.filter(g => g.id !== group.id);
-      }
-      break;
-    }
-  }
-
-  const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
-  if (tab) tab.remove();
-  updateTabScrollButtons();
 
   if (activeSessionId === sessionId) {
     activeSessionId = null;
     updateSessionPromptGhost(null);
-    const remainingTabs = document.querySelectorAll('.tab');
+    const remainingTabs = [...document.querySelectorAll('.tab')];
     if (remainingTabs.length > 0) {
       switchToSession(remainingTabs[remainingTabs.length - 1].dataset.sessionId);
     } else {
@@ -2107,7 +2360,7 @@ function updateTabStatus(sessionId, alive) {
 
 function ensureSessionOrder() {
   // Build sessionOrder from current active sessions if it's empty or stale
-  const activeIds = new Set([...terminals.keys()]);
+  const activeIds = new Set(sessionAliveState);
   // Add any active sessions not yet in sessionOrder
   for (const id of activeIds) {
     if (!sessionOrder.includes(id)) sessionOrder.push(id);
@@ -2213,16 +2466,7 @@ function addTabToGroup(sessionId, groupId) {
 }
 
 function removeTabFromGroup(sessionId) {
-  for (const g of tabGroups) {
-    const idx = g.tabIds.indexOf(sessionId);
-    if (idx !== -1) {
-      g.tabIds.splice(idx, 1);
-      if (g.tabIds.length === 0) {
-        tabGroups = tabGroups.filter(grp => grp.id !== g.id);
-      }
-      break;
-    }
-  }
+  tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
   renderSessionList();
   saveTabState();
 }
@@ -2385,9 +2629,11 @@ function showSessionContextMenu(e, sessionId) {
 }
 
 function startGroupRename(group) {
+  if (activeSessionRenameId || (activeGroupRenameId && activeGroupRenameId !== group.id)) return;
   const header = sessionList.querySelector(`.session-group-header[data-group-id="${group.id}"]`);
   if (!header) return;
   const nameSpan = header.querySelector('.session-group-name');
+  activeGroupRenameId = group.id;
   nameSpan.setAttribute('contenteditable', 'true');
   nameSpan.focus();
   const range = document.createRange();
@@ -2397,6 +2643,9 @@ function startGroupRename(group) {
   sel.addRange(range);
 
   const finishRename = () => {
+    if (activeGroupRenameId === group.id) {
+      activeGroupRenameId = null;
+    }
     nameSpan.setAttribute('contenteditable', 'false');
     let newName = nameSpan.textContent.trim().substring(0, 50);
     if (newName) group.name = newName;
@@ -2447,16 +2696,7 @@ function showGroupContextMenu(e, groupId) {
 }
 
 function removeTabFromGroupSilent(sessionId) {
-  for (const g of tabGroups) {
-    const idx = g.tabIds.indexOf(sessionId);
-    if (idx !== -1) {
-      g.tabIds.splice(idx, 1);
-      if (g.tabIds.length === 0) {
-        tabGroups = tabGroups.filter(grp => grp.id !== g.id);
-      }
-      break;
-    }
-  }
+  tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
 }
 
 // Status panel
@@ -2602,7 +2842,11 @@ async function updateStatusPanel(sessionId) {
   const summaryText = status.summary?.text
     ? `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`
     : '<div class="status-summary-empty">No summary yet for this session.</div>';
-  const summaryMeta = renderStatusSummaryMetaHtml(sessionId);
+  const directoryAvailability = await window.api.getSessionDirectoryAvailability(sessionId).catch(() => ({
+    sessionDirectoryAvailable: false,
+    filesDirectoryAvailable: false,
+  }));
+  const summaryMeta = renderStatusSummaryMetaHtml(sessionId, directoryAvailability);
   html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
 
   // Next steps
@@ -3558,7 +3802,6 @@ document.addEventListener('mouseup', () => {
 searchInput.addEventListener('input', (e) => {
   searchQuery = e.target.value;
   searchClear.classList.toggle('hidden', !searchQuery);
-  queueSidebarSearch(searchQuery);
   renderSessionList();
 });
 searchInput.addEventListener('focus', () => {
@@ -3571,7 +3814,6 @@ searchClear.addEventListener('click', () => {
   searchInput.value = '';
   searchQuery = '';
   searchClear.classList.add('hidden');
-  queueSidebarSearch('');
   renderSessionList();
   searchInput.focus();
 });
@@ -3804,59 +4046,47 @@ document.addEventListener('wheel', (e) => {
 
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
-  const mod = e.ctrlKey || e.metaKey;
-  // Resolve letter shortcuts via physical code so they work on non-Latin layouts (e.g. Hebrew).
-  const sk = getShortcutKey(e);
-
-  // Ctrl/Cmd+N or Ctrl/Cmd+T: Create new session from anywhere
-  if (mod && !e.shiftKey && (sk === 'n' || sk === 't')) { 
-    e.preventDefault(); 
-    newSession(); 
-  }
-
-  // Zoom: Ctrl/Cmd + '+'/'-'/'0'
-  if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); applyZoom('in'); return; }
-  if (mod && e.key === '-') { e.preventDefault(); applyZoom('out'); return; }
-  if (mod && e.key === '0') { e.preventDefault(); applyZoom('reset'); return; }
-
-  // Ctrl/Cmd+Tab: Switch between session tabs
-  if (e.ctrlKey && e.key === 'Tab') {
+  const shortcutAction = getGlobalShortcutAction(e, {
+    activeElement: document.activeElement,
+    hasActiveSession: !!(activeSessionId && terminals.has(activeSessionId)),
+  });
+  if (shortcutAction) {
     e.preventDefault();
-    const tabs = [...document.querySelectorAll('.tab')];
-    if (tabs.length < 2) return;
-    const i = tabs.findIndex(t => t.dataset.sessionId === activeSessionId);
-    const next = e.shiftKey ? (i - 1 + tabs.length) % tabs.length : (i + 1) % tabs.length;
-    switchToSession(tabs[next].dataset.sessionId);
-  }
-
-  // Ctrl/Cmd+W: Close current session tab
-  if (mod && sk === 'w') {
-    e.preventDefault();
-    const ae = document.activeElement;
-    const isXterm = ae?.classList.contains('xterm-helper-textarea');
-    if (!isXterm && (ae?.tagName === 'INPUT' || ae?.tagName === 'TEXTAREA')) return;
-    if (activeSessionId) closeTab(activeSessionId);
-  }
-
-  // Ctrl/Cmd+Shift+T: Restore last closed tab
-  if (mod && e.shiftKey && sk === 't') {
-    e.preventDefault();
-    const validIds = new Set([...allSessions.map(session => session.id), ...terminals.keys()]);
-    const sessionId = popRestorableClosedSession(recentlyClosedSessions, validIds);
-    if (sessionId) openSession(sessionId);
-  }
-
-  // Ctrl/Cmd+I: Toggle status panel
-  if (mod && sk === 'i') {
-    e.preventDefault();
-    toggleStatusPanel();
-  }
-
-  // Ctrl/Cmd+F: Open in-session search when a session is active
-  if (mod && !e.shiftKey && sk === 'f') {
-    e.preventDefault();
-    if (activeSessionId && terminals.has(activeSessionId)) openSessionSearch();
-    else focusSidebarSearch();
+    switch (shortcutAction.type) {
+      case 'new-session':
+        newSession();
+        return;
+      case 'zoom':
+        applyZoom(shortcutAction.direction);
+        return;
+      case 'switch-tab': {
+        const tabs = [...document.querySelectorAll('.tab')];
+        if (tabs.length < 2) return;
+        const i = tabs.findIndex(t => t.dataset.sessionId === activeSessionId);
+        const next = shortcutAction.direction < 0
+          ? (i - 1 + tabs.length) % tabs.length
+          : (i + 1) % tabs.length;
+        switchToSession(tabs[next].dataset.sessionId);
+        return;
+      }
+      case 'close-tab':
+        if (activeSessionId) closeTab(activeSessionId);
+        return;
+      case 'restore-tab':
+        void restoreMostRecentClosedTab();
+        return;
+      case 'toggle-status':
+        toggleStatusPanel();
+        return;
+      case 'session-search':
+        openSessionSearch();
+        return;
+      case 'sidebar-search':
+        focusSidebarSearch();
+        return;
+      default:
+        break;
+    }
   }
 
   if (e.key === 'Escape') {
@@ -3885,4 +4115,12 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-init();
+init()
+  .then(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    startupLoading.complete();
+  })
+  .catch((error) => {
+    console.error('DeepSky startup failed', error);
+    startupLoading.fail(error);
+  });

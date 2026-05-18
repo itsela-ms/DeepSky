@@ -42,6 +42,10 @@ describe('SettingsService', () => {
     it('sidebarHidden defaults to false', () => {
       expect(svc.get().sidebarHidden).toBe(false);
     });
+
+    it('activeSessions defaults to an empty array', () => {
+      expect(svc.get().activeSessions).toEqual([]);
+    });
   });
 
   describe('update + persistence', () => {
@@ -76,6 +80,13 @@ describe('SettingsService', () => {
       const svc2 = new SettingsService(tmpDir);
       await svc2.load();
       expect(svc2.get().sidebarHidden).toBe(true);
+    });
+
+    it('persists activeSessions across load', async () => {
+      await svc.update({ activeSessions: ['session-a', 'session-b'] });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().activeSessions).toEqual(['session-a', 'session-b']);
     });
 
     it('rejects unknown settings keys', async () => {

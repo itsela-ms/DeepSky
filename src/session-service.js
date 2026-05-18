@@ -3,6 +3,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const readline = require('readline');
 const { readPreferredSessionCwd } = require('./session-cwd');
+const { HISTORY_SESSION_LIMIT, getHistoryScopeCutoff } = require('./history-limit');
 class SessionService {
   constructor(sessionStateDir) {
     this.dir = sessionStateDir;
@@ -68,20 +69,67 @@ class SessionService {
     }
   }
 
-  async listSessions() {
+  _normalizeListScope(options = {}) {
+    return String(options?.scope || '').trim().toLowerCase() === 'history' ? 'history' : 'all';
+  }
+
+  async _readSessionEntries() {
     const entries = await fs.promises.readdir(this.dir, { withFileTypes: true }).catch((error) => {
       if (error?.code === 'ENOENT') return [];
       throw error;
     });
-    const dirs = entries.filter(e => e.isDirectory());
+    return entries.filter(e => e.isDirectory());
+  }
 
-    const results = await Promise.allSettled(dirs.map(entry => this._loadSession(entry)));
-    const sessions = results
+  async _getSessionLastModifiedHint(entry) {
+    const sessionDir = path.join(this.dir, entry.name);
+    const candidatePaths = [
+      sessionDir,
+      path.join(sessionDir, 'workspace.yaml'),
+      path.join(sessionDir, 'events.jsonl'),
+    ];
+    const stats = await Promise.allSettled(candidatePaths.map(filePath => fs.promises.stat(filePath)));
+    return stats
+      .filter(result => result.status === 'fulfilled')
+      .reduce((max, result) => Math.max(max, result.value.mtimeMs), 0);
+  }
+
+  async listSessions(options = {}) {
+    const scope = this._normalizeListScope(options);
+    const dirs = await this._readSessionEntries();
+    let entriesToLoad = dirs.map(entry => ({ entry, lastModifiedHint: 0 }));
+
+    if (scope === 'history') {
+      const cutoffMs = getHistoryScopeCutoff().getTime();
+      const candidates = await Promise.allSettled(dirs.map(async (entry) => ({
+        entry,
+        lastModifiedHint: await this._getSessionLastModifiedHint(entry),
+      })));
+
+      entriesToLoad = candidates
+        .filter(result => result.status === 'fulfilled' && result.value.lastModifiedHint >= cutoffMs)
+        .map(result => result.value)
+        .sort((a, b) => b.lastModifiedHint - a.lastModifiedHint)
+        .slice(0, HISTORY_SESSION_LIMIT);
+    }
+
+    const results = await Promise.allSettled(entriesToLoad.map(item => this._loadSession(item.entry, item.lastModifiedHint)));
+    let sessions = results
       .filter(r => r.status === 'fulfilled' && r.value !== null)
       .map(r => r.value);
 
     // Sort by last modified, newest first
     sessions.sort((a, b) => b.lastModified - a.lastModified);
+    if (scope === 'history') {
+      const cutoffMs = getHistoryScopeCutoff().getTime();
+      sessions = sessions
+        .filter((session) => {
+          const updatedAtMs = Date.parse(session.updatedAt);
+          const effectiveMs = Number.isFinite(updatedAtMs) ? updatedAtMs : session.lastModified;
+          return effectiveMs >= cutoffMs;
+        })
+        .slice(0, HISTORY_SESSION_LIMIT);
+    }
     return sessions;
   }
 
@@ -106,7 +154,7 @@ class SessionService {
     return this._extractLastUserPromptFromEvents(sessionDir);
   }
 
-  async _loadSession(entry) {
+  async _loadSession(entry, lastModifiedHint = 0) {
     const sessionDir = path.join(this.dir, entry.name);
     const yamlPath = path.join(sessionDir, 'workspace.yaml');
 
@@ -178,13 +226,14 @@ class SessionService {
       const cwd = await readPreferredSessionCwd(sessionDir);
 
       const stat = await fs.promises.stat(sessionDir);
+      const lastModified = Math.max(stat.mtimeMs, yamlStat.mtimeMs, Number(lastModifiedHint) || 0);
       return {
         id: entry.name,
         title,
         cwd,
         createdAt: meta.created_at || stat.birthtime.toISOString(),
-        updatedAt: meta.updated_at || stat.mtime.toISOString(),
-        lastModified: stat.mtime.getTime()
+        updatedAt: meta.updated_at || new Date(lastModified).toISOString(),
+        lastModified,
       };
     } catch {
       // Skip sessions with unreadable metadata

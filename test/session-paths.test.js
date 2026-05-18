@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 const {
+  getSessionDirectoryAvailability,
   resolveGeneratedFilePath,
   resolveSessionDirectory,
   resolveSessionFilesDirectory,
@@ -193,6 +194,33 @@ describe('session-paths', () => {
         realpathImpl: realpath,
         lstatImpl: lstat,
       })).rejects.toThrow('Generated file no longer exists.');
+    });
+  });
+
+  describe('getSessionDirectoryAvailability', () => {
+    it('returns separate availability flags for session and files directories', async () => {
+      const base = 'C:\\Users\\itsela\\.copilot\\session-state';
+      const sessionId = '376fedd7-eec9-429e-a4b9-5fb252880d42';
+      const realpath = vi
+        .fn()
+        .mockResolvedValueOnce(base)
+        .mockResolvedValueOnce(`${base}\\${sessionId}`)
+        .mockResolvedValueOnce(base)
+        .mockRejectedValueOnce(new Error('missing'));
+      const lstat = vi
+        .fn()
+        .mockResolvedValueOnce({
+          isSymbolicLink: () => false,
+          isDirectory: () => true,
+        });
+
+      await expect(getSessionDirectoryAvailability(base, sessionId, {
+        realpathImpl: realpath,
+        lstatImpl: lstat,
+      })).resolves.toEqual({
+        sessionDirectoryAvailable: true,
+        filesDirectoryAvailable: false,
+      });
     });
   });
 });

@@ -1,3 +1,16 @@
+function rememberRestorableClosedSession(stack, sessionId) {
+  if (!sessionId) {
+    return;
+  }
+
+  const existingIndex = stack.lastIndexOf(sessionId);
+  if (existingIndex !== -1) {
+    stack.splice(existingIndex, 1);
+  }
+
+  stack.push(sessionId);
+}
+
 function popRestorableClosedSession(stack, validIds) {
   while (stack.length > 0) {
     const sessionId = stack.pop();
@@ -8,4 +21,4 @@ function popRestorableClosedSession(stack, validIds) {
   return null;
 }
 
-module.exports = { popRestorableClosedSession };
+module.exports = { rememberRestorableClosedSession, popRestorableClosedSession };

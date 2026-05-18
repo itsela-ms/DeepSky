@@ -24,13 +24,22 @@
   <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
   <div id="notification-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
+  <div id="startup-loading-screen" class="startup-loading-screen" role="status" aria-live="polite" aria-hidden="false" aria-busy="true">
+    <div class="startup-loading-card">
+      <div class="startup-loading-brand">DeepSky</div>
+      <div class="startup-loading-spinner" aria-hidden="true"></div>
+      <div id="startup-loading-title" class="startup-loading-title">Starting DeepSky...</div>
+      <div id="startup-loading-message" class="startup-loading-message">Loading your sessions and workspace...</div>
+    </div>
+  </div>
+
   <div id="app">
     <!-- Sidebar -->
       <aside id="sidebar">
         <div id="sidebar-header">
           <div id="search-wrapper">
             <button id="sidebar-search-toggle" class="sidebar-icon-btn" title="Search sessions">🔍</button>
-            <input type="text" id="search" placeholder="Search sessions, tags & content..." autocomplete="off" spellcheck="false">
+            <input type="text" id="search" placeholder="Search titles, folders, tags & resources..." autocomplete="off" spellcheck="false">
             <button id="search-clear" class="search-clear hidden" title="Clear search (Esc)">✕</button>
           </div>
         </div>
@@ -291,9 +300,14 @@
         <div class="settings-tab-panel" data-settings-panel="about">
           <div class="settings-group">
             <div id="about-version-tab" class="about-version"></div>
+            <div id="about-release-meta" class="about-release-meta"></div>
+            <div class="about-actions">
+              <button type="button" id="about-open-brochure" class="about-link-button">Open brochure</button>
+              <button type="button" id="about-open-changelog" class="about-link-button">Open full changelog</button>
+            </div>
           </div>
           <div class="settings-group">
-            <label class="settings-label">Changelog</label>
+            <label class="settings-label">Recent release notes</label>
             <div id="about-changelog" class="about-changelog"></div>
           </div>
         </div>

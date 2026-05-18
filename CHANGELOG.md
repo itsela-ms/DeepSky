@@ -2,6 +2,31 @@
 
 All notable changes to DeepSky are documented here.
 
+## [1.2.0] - 2026-05-18
+
+### Added
+- **Readable About release notes** — the About tab now renders recent changelog entries as structured release cards and highlights the current build.
+- **Brochure access from About** — the About tab includes an availability-aware **Open brochure** action so local release collateral is one click away.
+- **Explicit full-history loading** — the History tab now has a **Show all history** button for intentionally loading older saved sessions beyond the default recent window.
+- **Startup loading screen** — DeepSky now shows phase-specific startup progress while settings, sessions, notifications, and workspace state load; startup failures stay visible instead of dropping into a half-loaded UI.
+
+### Changed
+- **Tighter status summary layout** — the Session ID now stays on a single truncated line, and the `session` / `files` quick actions stay compact on one row.
+- **Split tab state from live-session state** — DeepSky now persists open tabs separately from active sessions so the tab strip, Active list, and startup restore no longer fight each other.
+- **History now defaults to a bounded recent view** — the History tab only loads up to 500 sessions from the last 3 months so the default sidebar stays responsive.
+- **Sidebar search is metadata-only by default** — title, folder, tags, and resources remain searchable without doing deep transcript scans unless you explicitly ask for it.
+
+### Fixed
+- **Non-Latin shortcut support** — keyboard shortcuts now work correctly on non-Latin keyboard layouts.
+- **Single-open terminal links** — terminal hyperlinks keep the pointer hover affordance without opening twice on click.
+- **Unavailable summary actions** — `session` / `files` quick actions are disabled and greyed out when those directories are unavailable.
+- **Tab close no longer stops live sessions** — closing a tab now only removes the tab UI and leaves the active session running.
+- **Tab close keeps active-list grouping** — closing a tab no longer drops that session out of its active-list group.
+- **Stable group rename focus** — double-click rename on a group header no longer loses focus during background sidebar refreshes.
+- **Correct Active-list startup restore** — reopening DeepSky restores the Active list from previously active sessions instead of rebuilding it from open tabs.
+- **Closed-tab restore works with scoped History again** — `Ctrl+Shift+T` now restores from the full session inventory instead of only the currently loaded sidebar subset.
+- **Closed-tab restore covers Active-list close paths** — `Ctrl+Shift+T` now restores sessions closed from the Active list, including fresh in-memory sessions before sidebar metadata catches up.
+
 ## [1.1.0] - 2026-05-04
 
 ### Added

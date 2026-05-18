@@ -27,6 +27,28 @@ describe('index.html accessibility regressions', () => {
     expect(html).not.toContain('Search sessions (Ctrl+F)');
   });
 
+  it('does not promise transcript content search in the sidebar placeholder', () => {
+    expect(html).toContain('placeholder="Search titles, folders, tags & resources..."');
+    expect(html).not.toContain('Search sessions, tags & content...');
+  });
+
+  it('includes a startup loading screen with live status text', () => {
+    expect(html).toContain('id="startup-loading-screen"');
+    expect(html).toContain('id="startup-loading-title"');
+    expect(html).toContain('id="startup-loading-message"');
+    expect(html).toMatch(/role="status"/);
+    expect(html).toMatch(/aria-live="polite"/);
+  });
+
+  it('surfaces recent release notes and a full changelog action in the About tab', () => {
+    expect(html).toContain('id="about-release-meta"');
+    expect(html).toContain('id="about-open-brochure"');
+    expect(html).toContain('id="about-open-changelog"');
+    expect(html).toContain('Open brochure');
+    expect(html).toContain('Open full changelog');
+    expect(html).toContain('Recent release notes');
+  });
+
   it('keeps the enhancement review iframe sandboxed away from the parent window', () => {
     expect(html).toContain('id="review-modal-iframe"');
     expect(html).toContain('sandbox="allow-scripts"');

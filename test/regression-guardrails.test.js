@@ -28,6 +28,7 @@ const ROOT = join(__dirname, '..');
 const RENDERER_SRC = readFileSync(join(ROOT, 'src', 'renderer.js'), 'utf8');
 const SHORTCUTS_SRC = readFileSync(join(ROOT, 'src', 'keyboard-shortcuts.js'), 'utf8');
 const MAIN_SRC = readFileSync(join(ROOT, 'src', 'main.js'), 'utf8');
+const PRELOAD_SRC = readFileSync(join(ROOT, 'src', 'preload.js'), 'utf8');
 
 // ───────────────────────────────────────────────────────────────────────────
 // Terminal link handling — double-open + hover-cursor regression guard
@@ -84,6 +85,32 @@ describe('shell:openExternal IPC — regression guardrails', () => {
   });
 });
 
+describe('sidebar history search — regression guardrails', () => {
+  it('does not call the deep session-content search API from the renderer sidebar', () => {
+    expect(RENDERER_SRC).not.toMatch(/window\.api\.searchSessions\(/);
+  });
+});
+
+describe('closed tab restore — regression guardrails', () => {
+  it('restores closed tabs against the all-sessions inventory, not the current sidebar subset', () => {
+    expect(RENDERER_SRC).toMatch(/listSessions\(\{\s*scope:\s*'all'\s*\}\)/);
+    expect(RENDERER_SRC).toMatch(/restoreMostRecentClosedTab/);
+    expect(RENDERER_SRC).toMatch(/allSessions\.map\(session => session\.id\)/);
+  });
+
+  it('handles Ctrl+Shift+T from the Electron input path, not only the renderer keydown path', () => {
+    expect(MAIN_SRC).toMatch(/before-input-event/);
+    expect(MAIN_SRC).toMatch(/shortcut:restore-tab/);
+    expect(MAIN_SRC).toMatch(/accelerator:\s*'CommandOrControl\+Shift\+T'/);
+    expect(PRELOAD_SRC).toMatch(/onRestoreTabShortcut/);
+    expect(RENDERER_SRC).toMatch(/onRestoreTabShortcut\(\(\)\s*=>\s*\{/);
+  });
+
+  it('keeps Active-list session closes restorable through Ctrl+Shift+T', () => {
+    expect(RENDERER_SRC).toMatch(/terminateSession\(item\.dataset\.sessionId,\s*\{\s*rememberClosedTab:\s*true\s*\}\)/);
+  });
+});
+
 // ───────────────────────────────────────────────────────────────────────────
 // Keyboard shortcuts — non-Latin layout regression guard
 // ───────────────────────────────────────────────────────────────────────────
@@ -91,6 +118,11 @@ describe('shell:openExternal IPC — regression guardrails', () => {
 describe('keyboard shortcuts — non-Latin layout regression guardrails', () => {
   it('renderer.js imports getShortcutKey from keyboard-shortcuts', () => {
     expect(RENDERER_SRC).toMatch(/getShortcutKey\b[\s\S]*require\(['"]\.\/keyboard-shortcuts['"]\)/);
+  });
+
+  it('renderer.js routes document shortcut decisions through getGlobalShortcutAction', () => {
+    expect(RENDERER_SRC).toMatch(/getGlobalShortcutAction\b[\s\S]*require\(['"]\.\/keyboard-shortcuts['"]\)/);
+    expect(RENDERER_SRC).toMatch(/const shortcutAction = getGlobalShortcutAction\(/);
   });
 
   it('renderer.js does not compare e.key to a single Latin letter (layout-dependent)', () => {
