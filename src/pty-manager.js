@@ -1,5 +1,6 @@
 const EventEmitter = require('events');
-const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 
 const os = require('os');
 
@@ -7,8 +8,12 @@ const os = require('os');
 let defaultPty;
 try { defaultPty = require('node-pty'); } catch { defaultPty = null; }
 
+const DEFAULT_SESSION_STATE_DIR = path.join(os.homedir(), '.copilot', 'session-state');
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 10000;
+const DEFAULT_DISCOVERY_POLL_INTERVAL_MS = 100;
+
 class PtyManager extends EventEmitter {
-  constructor(copilotPath, settingsService, ptyModule) {
+  constructor(copilotPath, settingsService, ptyModule, options = {}) {
     super();
     this.copilotPath = copilotPath;
     this.sessions = new Map();
@@ -19,10 +24,22 @@ class PtyManager extends EventEmitter {
     this._useCmd = process.platform === 'win32' &&
       copilotPath.toLowerCase().endsWith('.cmd');
     this._standby = null;
-  }
 
-  _generateId() {
-    return crypto.randomUUID();
+    // Pre-CLI-1.0.49, passing `--resume <fresh-uuid>` made the CLI silently
+    // create a brand-new session at that exact UUID, which DeepSky relied on
+    // so it could track the session by its self-generated ID. CLI 1.0.49+
+    // rejects unknown IDs ("Error: No session, task, or name matched ...") so
+    // DeepSky now spawns new sessions WITHOUT `--resume` and discovers the
+    // CLI-assigned session ID by diffing this directory. The discovery is
+    // injectable for tests.
+    this._sessionStateDir = options.sessionStateDir || DEFAULT_SESSION_STATE_DIR;
+    this._discoveryTimeoutMs = options.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS;
+    this._sessionIdDiscoverer = options.sessionIdDiscoverer
+      || ((before, pty) => this._defaultDiscoverer(before, pty));
+
+    // Serialize concurrent spawn+discover sequences so two parallel
+    // newSession/warmUp calls can't race on the folder-diff snapshot.
+    this._spawnLock = Promise.resolve();
   }
 
   _resolveLauncher(launcher) {
@@ -46,6 +63,54 @@ class PtyManager extends EventEmitter {
 
   get maxConcurrent() {
     return this.settingsService?.get().maxConcurrent || 5;
+  }
+
+  // Serialize spawn+discover sequences so concurrent newSession/warmUp
+  // calls don't race on the folder-snapshot diff used for ID discovery.
+  async _serializeSpawn(fn) {
+    const prev = this._spawnLock;
+    let resolveOurs;
+    this._spawnLock = new Promise(r => { resolveOurs = r; });
+    try {
+      await prev.catch(() => {});
+      return await fn();
+    } finally {
+      resolveOurs();
+    }
+  }
+
+  async _snapshotSessionFolders() {
+    try {
+      const entries = await fs.promises.readdir(this._sessionStateDir, { withFileTypes: true });
+      return new Set(entries.filter(e => e.isDirectory()).map(e => e.name));
+    } catch {
+      // Directory might not exist yet; treat as empty snapshot
+      return new Set();
+    }
+  }
+
+  // Default discoverer: poll session-state dir until a folder not present in
+  // `beforeSnapshot` shows up. Folder appears within ~3s in practice; we wait
+  // up to `_discoveryTimeoutMs` (10s default) before giving up.
+  async _defaultDiscoverer(beforeSnapshot /* , ptyProcess */) {
+    const start = Date.now();
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    while (Date.now() - start < this._discoveryTimeoutMs) {
+      let entries;
+      try {
+        entries = await fs.promises.readdir(this._sessionStateDir, { withFileTypes: true });
+      } catch {
+        await sleep(DEFAULT_DISCOVERY_POLL_INTERVAL_MS);
+        continue;
+      }
+      for (const e of entries) {
+        if (e.isDirectory() && !beforeSnapshot.has(e.name)) {
+          return e.name;
+        }
+      }
+      await sleep(DEFAULT_DISCOVERY_POLL_INTERVAL_MS);
+    }
+    throw new Error('Timed out waiting for CLI session-state folder to appear');
   }
 
   openSession(sessionId, cwd, launcher) {
@@ -138,16 +203,23 @@ class PtyManager extends EventEmitter {
   }
 
   newSession(cwd, launcher, extraArgs = []) {
-    const sessionId = this._generateId();
+    return this._serializeSpawn(() => this._newSessionImpl(cwd, launcher, extraArgs));
+  }
 
+  async _newSessionImpl(cwd, launcher, extraArgs = []) {
     this._evictIfNeeded();
 
     const spawnCwd = cwd || os.homedir();
-    const buildArgs = ['--resume', sessionId, '--yolo', ...extraArgs];
+    // Snapshot BEFORE spawn so the post-spawn diff reveals the folder the CLI
+    // creates for this new session. We avoid passing --resume/--name because
+    // CLI 1.0.49+ rejects unknown IDs.
+    const beforeSnapshot = await this._snapshotSessionFolders();
+    const buildArgs = ['--yolo', ...extraArgs];
     let ptyProcess;
+    let resolvedLauncher;
     try {
       const spawnConfig = this._spawnArgs(buildArgs, launcher);
-      launcher = spawnConfig.launcher;
+      resolvedLauncher = spawnConfig.launcher;
       const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
         name: 'xterm-256color',
@@ -160,7 +232,7 @@ class PtyManager extends EventEmitter {
       if (cwd && cwd !== os.homedir()) {
         try {
           const spawnConfig = this._spawnArgs(buildArgs, launcher);
-          launcher = spawnConfig.launcher;
+          resolvedLauncher = spawnConfig.launcher;
           const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {
             name: 'xterm-256color',
@@ -170,11 +242,19 @@ class PtyManager extends EventEmitter {
             env: { ...process.env, TERM: 'xterm-256color' }
           });
         } catch (err2) {
-          throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err2.message}`);
+          throw new Error(`Failed to spawn PTY: ${err2.message}`);
         }
       } else {
-        throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err.message}`);
+        throw new Error(`Failed to spawn PTY: ${err.message}`);
       }
+    }
+
+    let sessionId;
+    try {
+      sessionId = await this._sessionIdDiscoverer(beforeSnapshot, ptyProcess);
+    } catch (err) {
+      try { ptyProcess.kill(); } catch {}
+      throw new Error(`Failed to discover session ID after CLI spawn: ${err.message}`);
     }
 
     const sessionEntry = {
@@ -184,7 +264,7 @@ class PtyManager extends EventEmitter {
       lastDataAt: null,
       dataBytesSinceIdle: 0,
       cwd: spawnCwd,
-      launcher: this._resolveLauncher(launcher)
+      launcher: resolvedLauncher
     };
 
     ptyProcess.onData((data) => {
@@ -237,6 +317,10 @@ class PtyManager extends EventEmitter {
   }
 
   warmUp(cwd, launcher) {
+    return this._serializeSpawn(() => this._warmUpImpl(cwd, launcher));
+  }
+
+  async _warmUpImpl(cwd, launcher) {
     if (this._standby && this._standby.alive) return;
     this._standby = null;
 
@@ -244,46 +328,59 @@ class PtyManager extends EventEmitter {
     const aliveCount = [...this.sessions.values()].filter(e => e.alive).length;
     if (aliveCount >= this.maxConcurrent) return;
 
-    const sessionId = this._generateId();
     const spawnCwd = cwd || os.homedir();
+    const beforeSnapshot = await this._snapshotSessionFolders();
+    let ptyProcess;
+    let spawnConfig;
     try {
-      const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+      spawnConfig = this._spawnArgs(['--yolo'], launcher);
       const { file, args } = spawnConfig;
-      const ptyProcess = this._pty.spawn(file, args, {
+      ptyProcess = this._pty.spawn(file, args, {
         name: 'xterm-256color',
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
         env: { ...process.env, TERM: 'xterm-256color' }
       });
-
-      const entry = {
-        id: sessionId,
-        pty: ptyProcess,
-        cwd: spawnCwd,
-        launcher: spawnConfig.launcher,
-        bufferedData: [],
-        alive: true,
-        claimed: false
-      };
-
-      ptyProcess.onData((data) => {
-        if (!entry.claimed && entry.alive) {
-          entry.bufferedData.push(data);
-        }
-      });
-
-      ptyProcess.onExit(() => {
-        if (!entry.claimed) {
-          entry.alive = false;
-          if (this._standby === entry) this._standby = null;
-        }
-      });
-
-      this._standby = entry;
     } catch {
       // Pre-warm failed — cold start will still work
+      return;
     }
+
+    let sessionId;
+    try {
+      sessionId = await this._sessionIdDiscoverer(beforeSnapshot, ptyProcess);
+    } catch {
+      // Couldn't determine the CLI's session ID; abandon the standby so a
+      // cold newSession() does the work instead.
+      try { ptyProcess.kill(); } catch {}
+      return;
+    }
+
+    const entry = {
+      id: sessionId,
+      pty: ptyProcess,
+      cwd: spawnCwd,
+      launcher: spawnConfig.launcher,
+      bufferedData: [],
+      alive: true,
+      claimed: false
+    };
+
+    ptyProcess.onData((data) => {
+      if (!entry.claimed && entry.alive) {
+        entry.bufferedData.push(data);
+      }
+    });
+
+    ptyProcess.onExit(() => {
+      if (!entry.claimed) {
+        entry.alive = false;
+        if (this._standby === entry) this._standby = null;
+      }
+    });
+
+    this._standby = entry;
   }
 
   claimStandby(cwd, launcher) {
