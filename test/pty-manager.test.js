@@ -543,13 +543,14 @@ describe('PtyManager', () => {
   // Integration check for the default fs-based discoverer. We avoid mocking fs
   // here so a CLI/Node update that changes readdir semantics surfaces here.
   describe('default session-id discoverer (fs-based)', () => {
-    it('returns the first folder name not present in the before-snapshot', async () => {
+    it('returns the first UUID folder name not present in the before-snapshot', async () => {
       const realFs = require('fs');
       const realPath = require('path');
       const realOs = require('os');
       const tmp = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'ds-pty-disc-'));
+      const discoveredId = '207cdf12-ab63-4d96-b4b3-1322d4a0bdfe';
       try {
-        realFs.mkdirSync(realPath.join(tmp, 'pre-existing'));
+        realFs.mkdirSync(realPath.join(tmp, '376fedd7-eec9-429e-a4b9-5fb252880d42'));
         // Use the real default discoverer
         manager = new PtyManager('/fake/copilot',
           { get: () => ({ maxConcurrent: 5 }) },
@@ -562,10 +563,39 @@ describe('PtyManager', () => {
         const newSessionPromise = manager.newSession('/cwd');
         // Simulate the CLI creating its folder ~150ms after spawn
         setTimeout(() => {
-          realFs.mkdirSync(realPath.join(tmp, 'real-cli-uuid-abc'));
+          realFs.mkdirSync(realPath.join(tmp, discoveredId));
         }, 150);
         const id = await newSessionPromise;
-        expect(id).toBe('real-cli-uuid-abc');
+        expect(id).toBe(discoveredId);
+      } finally {
+        vi.useFakeTimers();
+        realFs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('ignores non-UUID folders created during discovery', async () => {
+      const realFs = require('fs');
+      const realPath = require('path');
+      const realOs = require('os');
+      const tmp = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'ds-pty-disc-'));
+      const discoveredId = '11111111-2222-4333-8444-555555555555';
+      try {
+        manager = new PtyManager('/fake/copilot',
+          { get: () => ({ maxConcurrent: 5 }) },
+          mockPtyModule,
+          { sessionStateDir: tmp, discoveryTimeoutMs: 3000 }
+        );
+
+        vi.useRealTimers();
+        const newSessionPromise = manager.newSession('/cwd');
+        setTimeout(() => {
+          realFs.mkdirSync(realPath.join(tmp, 'not-a-session-id'));
+        }, 50);
+        setTimeout(() => {
+          realFs.mkdirSync(realPath.join(tmp, discoveredId));
+        }, 150);
+        const id = await newSessionPromise;
+        expect(id).toBe(discoveredId);
       } finally {
         vi.useFakeTimers();
         realFs.rmSync(tmp, { recursive: true, force: true });

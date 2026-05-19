@@ -301,7 +301,7 @@ if (!hasSingleInstanceLock) {
     }
 
     // Cold start fallback
-    const sessionId = ptyManager.newSession(cwd || undefined, launcher);
+    const sessionId = await ptyManager.newSession(cwd || undefined, launcher);
     if (cwd) {
       await sessionService.saveCwd(sessionId, cwd);
     }
@@ -487,7 +487,7 @@ if (!hasSingleInstanceLock) {
         throw new Error(sessionSupport.reason);
       }
       const launcher = sessionSupport.launcher;
-      const sessionId = ptyManager.newSession(undefined, launcher, ['-i', oneLineCommand]);
+      const sessionId = await ptyManager.newSession(undefined, launcher, ['-i', oneLineCommand]);
       await sessionService.saveLauncher(sessionId, launcher);
       scheduleWarmUp();
 

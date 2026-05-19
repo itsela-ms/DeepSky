@@ -2,7 +2,7 @@
 
 All notable changes to DeepSky are documented here.
 
-## [Unreleased]
+## [1.2.1] - 2026-05-19
 
 ### Fixed
 - **Compatibility with Copilot CLI 1.0.49+** — new sessions and warm-up standbys no longer pass `--resume <unknown-uuid>` to the CLI. The CLI changed in 1.0.49 to strictly reject unknown IDs (`Error: No session, task, or name matched '<uuid>'`), which caused every newly opened tab to die immediately. DeepSky now spawns new sessions without `--resume` and discovers the CLI-assigned session ID by diffing the `~/.copilot/session-state` directory. Existing sessions (resume from sidebar) are unchanged.
