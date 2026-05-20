@@ -119,6 +119,57 @@ describe('app-support', () => {
       expect(result).toEqual({ path: 'agency', found: false });
       expect(execSync).not.toHaveBeenCalled();
     });
+
+    it('passes stdio that detaches child stdin so where cannot EPIPE the parent', () => {
+      const execSync = vi.fn(() => 'C:\\Tools\\copilot.exe\r\n');
+      const existsSync = vi.fn(() => true);
+      resolveCommandPath({
+        names: ['copilot.exe'],
+        candidates: [],
+        fallbackCommand: 'copilot',
+        execSyncImpl: execSync,
+        existsSync,
+      });
+      expect(execSync).toHaveBeenCalledTimes(1);
+      const [, opts] = execSync.mock.calls[0];
+      expect(opts).toMatchObject({ stdio: ['ignore', 'pipe', 'ignore'] });
+    });
+  });
+
+  describe('command-path caching', () => {
+    const { _clearCommandPathCache } = require('../src/app-support');
+
+    it('caches resolveCopilotInfo across calls so Ctrl+W does not shell out per close', () => {
+      _clearCommandPathCache();
+      // First call uses the real (uninjected) execSync — we exercise the
+      // cacheable production path. The probe is run and the result memoized;
+      // a second call returns the SAME reference without re-probing.
+      const first = resolveCopilotInfo();
+      const second = resolveCopilotInfo();
+      expect(second).toBe(first);
+    });
+
+    it('caches resolveAgencyInfo across calls', () => {
+      _clearCommandPathCache();
+      const first = resolveAgencyInfo();
+      const second = resolveAgencyInfo();
+      expect(second).toBe(first);
+    });
+
+    it('bypasses the cache when deps are injected so tests stay isolated', () => {
+      _clearCommandPathCache();
+      // Warm the production cache.
+      resolveCopilotInfo();
+      // Inject a deterministic execSync — the cache must NOT be returned.
+      const execSync = vi.fn(() => { throw new Error('nope'); });
+      const existsSync = vi.fn(() => false);
+      const injected = resolveCopilotInfo({ execSync, existsSync, env: {} });
+      expect(injected).toEqual({ path: 'copilot', found: false });
+      // Subsequent uncached call still returns the production-cached value,
+      // confirming the injected call did not overwrite or replace it.
+      const reCached = resolveCopilotInfo();
+      expect(reCached).not.toBe(injected);
+    });
   });
 
   describe('session id validation', () => {

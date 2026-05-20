@@ -302,8 +302,10 @@ if (!hasSingleInstanceLock) {
       };
     }
 
-    // Cold start fallback
-    const sessionId = ptyManager.newSession(cwd || undefined, launcher);
+    // Cold start fallback. ptyManager.newSession is async (serialized via
+    // _serializeSpawn); without await we'd persist using a Promise as the
+    // session id and crash _getSessionDir with "Invalid session ID".
+    const sessionId = await ptyManager.newSession(cwd || undefined, launcher);
     if (cwd) {
       await sessionService.saveCwd(sessionId, cwd);
     }
@@ -668,9 +670,9 @@ if (!hasSingleInstanceLock) {
       .filter(session => contentMatchIds.has(session.id) || sessionMatchesSidebarSearch(session, needle));
   });
 
-  ipcMain.handle('session:getLastUserPrompt', async (event, sessionId) => {
+  ipcMain.handle('session:getLastUserPrompt', async (event, sessionId, options) => {
     sessionId = requireValidSessionId(sessionId);
-    return sessionService.getLastUserPrompt(sessionId);
+    return sessionService.getLastUserPrompt(sessionId, options);
   });
 
   ipcMain.handle('session:rename', async (event, sessionId, title) => {

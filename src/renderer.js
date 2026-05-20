@@ -24,6 +24,7 @@ const { createStartupLoadingController } = require('./startup-loading');
 // State
 const terminals = new Map();
 const sessionBusyState = new Map(); // sessionId → boolean (has recent pty output)
+const sessionBusyTimers = new Map(); // sessionId → debounce timeout id (Working → Waiting)
 const sessionAliveState = new Set(); // sessionIds with live pty processes
 const openTabIds = new Set(); // sessionIds currently shown in the tab strip
 let activeSessionId = null;
@@ -112,6 +113,41 @@ const searchClear = document.getElementById('search-clear');
 const sidebarSearchToggle = document.getElementById('sidebar-search-toggle');
 const terminalContainer = document.getElementById('terminal-container');
 const terminalPromptGhost = document.getElementById('terminal-prompt-ghost');
+// Event delegation for the copy-last-prompt button inside the prompt ghost.
+// The button is recreated via innerHTML on every prompt-ghost render, so we
+// can't bind directly to it — delegate on the stable parent element. We
+// capture the sessionId from the button's data-attribute (set at render
+// time) so an in-flight activeSessionId change can't cause us to copy the
+// wrong session's prompt.
+if (terminalPromptGhost) {
+  terminalPromptGhost.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.prompt-copy-btn');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sessionId = btn.dataset.sessionId;
+    if (!sessionId) return;
+    if (btn.dataset.copying === '1') return;
+    btn.dataset.copying = '1';
+    btn.classList.add('copying');
+    try {
+      const text = await window.api.getLastUserPrompt(sessionId, { full: true });
+      if (!text) {
+        showToast({ type: 'info', title: 'Nothing to copy', body: 'No previous user prompt found for this session.' });
+        return;
+      }
+      await window.api.copyText(text);
+      btn.classList.remove('copying');
+      btn.classList.add('copied');
+      setTimeout(() => btn.classList.remove('copied'), 1500);
+      showToast({ type: 'success', title: 'Prompt copied', body: text.length > 80 ? text.slice(0, 77) + '…' : text });
+    } catch (err) {
+      showToast({ type: 'error', title: 'Copy failed', body: String(err?.message || err) });
+    } finally {
+      delete btn.dataset.copying;
+    }
+  });
+}
 const sessionSearch = document.getElementById('session-search');
 const sessionSearchInput = document.getElementById('session-search-input');
 const sessionSearchCount = document.getElementById('session-search-count');
@@ -445,7 +481,6 @@ function updateSessionPromptGhost(sessionId) {
 
   const session = allSessions.find(s => s.id === sessionId);
   const title = session?.title || 'New Session';
-  const shortId = sessionId.substring(0, 8);
   const state = getSessionPromptGhost(sessionId);
   const lastPrompt = state.lastPrompt || '';
 
@@ -455,6 +490,10 @@ function updateSessionPromptGhost(sessionId) {
   if (lastPrompt) {
     html += `<span class="info-divider">│</span>`;
     html += `<span class="info-prompt" title="${esc(lastPrompt)}">💬 ${esc(lastPrompt)}</span>`;
+    // Copy button — placed at the right end. data-session-id locks in the
+    // session that was active at render-time so a later activeSessionId change
+    // can't make us copy the wrong session's prompt (rubber-duck race).
+    html += `<button class="prompt-copy-btn" type="button" data-session-id="${esc(sessionId)}" title="Copy last prompt" aria-label="Copy last user prompt to clipboard"><span class="prompt-copy-icon" aria-hidden="true">⧉</span></button>`;
   }
 
   terminalPromptGhost.innerHTML = html;
@@ -789,7 +828,7 @@ async function init() {
       });
     }
     sessionAliveState.add(sessionId);
-    sessionBusyState.set(sessionId, true);
+    markSessionBusy(sessionId);
     schedulePatchSessionStateBadges(sessionId);
   }));
   ipcCleanups.push(window.api.onRestoreTabShortcut(() => {
@@ -828,8 +867,7 @@ async function init() {
       }, 3000);
     }
     sessionAliveState.delete(sessionId);
-    sessionBusyState.delete(sessionId);
-    sessionIdleCount.delete(sessionId);
+    clearSessionBusy(sessionId);
     cwdChangingSessions.delete(sessionId);
     updateTabStatus(sessionId, false);
     schedulePatchSessionStateBadges(sessionId);
@@ -837,8 +875,7 @@ async function init() {
 
   const evictedUnsub = window.api.onPtyEvicted?.((sessionId) => {
     sessionAliveState.delete(sessionId);
-    sessionBusyState.delete(sessionId);
-    sessionIdleCount.delete(sessionId);
+    clearSessionBusy(sessionId);
     cwdChangingSessions.delete(sessionId);
     const entry = terminals.get(sessionId);
     if (entry) {
@@ -1082,6 +1119,11 @@ async function init() {
     if (Array.isArray(settings.sessionOrder) && settings.sessionOrder.length > 0) {
       sessionOrder = settings.sessionOrder.filter(id => sessionAliveState.has(id));
     }
+
+    // Tabs were appended in openSession resolution order (which can differ
+    // from saved sessionOrder due to Promise.allSettled). Realign now that
+    // the canonical order is loaded so Ctrl+Tab and visual order agree.
+    syncTabStripOrder();
 
     renderSessionList();
 
@@ -1450,12 +1492,53 @@ async function getAllValidSessionIds() {
   ]);
 }
 
-const BUSY_THRESHOLD_MS = 30000;
+const BUSY_THRESHOLD_MS = 1500;
 const STATUS_POLL_MS = 3000;
 // Consecutive idle polls required before transitioning Working → Waiting.
-// Prevents flickering when AI pauses briefly between output bursts.
-const IDLE_GRACE_POLLS = 3;
+// The primary "go to Waiting" path is the per-session debounce timer (see
+// markSessionBusy + sessionBusyTimers). This poll-based decay is just a
+// fallback for situations where the debounce timer never fired (e.g. session
+// was already busy before the renderer attached). Keep it at 1 so the
+// fallback also flips within ~3s instead of the previous ~39s.
+const IDLE_GRACE_POLLS = 1;
+// Time (ms) of pty silence after which a session flips from Working to
+// Waiting. Tuned so brief spinner pauses during streaming don't toggle the
+// badge, while users still see "Waiting" almost immediately when the agent
+// stops responding.
+const BUSY_DEBOUNCE_MS = 1200;
 const sessionIdleCount = new Map();
+
+// Centralized cleanup so every "session is gone / not busy anymore" code
+// path stays in sync (timer + busy flag + idle counter). The previous
+// scattered `sessionBusyState.delete` / `sessionIdleCount.delete` pairs
+// were prone to leaking the new debounce timer.
+function clearSessionBusy(sessionId) {
+  const timer = sessionBusyTimers.get(sessionId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    sessionBusyTimers.delete(sessionId);
+  }
+  sessionBusyState.delete(sessionId);
+  sessionIdleCount.delete(sessionId);
+}
+
+// Mark a session as Working *now* and schedule an automatic flip back to
+// Waiting after BUSY_DEBOUNCE_MS of silence. Called from the pty:data
+// listener — every chunk resets the timer.
+function markSessionBusy(sessionId) {
+  sessionBusyState.set(sessionId, true);
+  sessionIdleCount.delete(sessionId);
+  const existing = sessionBusyTimers.get(sessionId);
+  if (existing !== undefined) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    sessionBusyTimers.delete(sessionId);
+    if (sessionBusyState.get(sessionId)) {
+      sessionBusyState.set(sessionId, false);
+      schedulePatchSessionStateBadges(sessionId);
+    }
+  }, BUSY_DEBOUNCE_MS);
+  sessionBusyTimers.set(sessionId, timer);
+}
 
 async function updateSessionBusyStates() {
   try {
@@ -1464,6 +1547,10 @@ async function updateSessionBusyStates() {
     const newAlive = new Set();
     for (const s of activeSessions) {
       newAlive.add(s.id);
+      // Skip sessions that have an active debounce timer — the timer is
+      // the source of truth in that case and we don't want the poll to
+      // race with it (would cause Working badge to flicker).
+      if (sessionBusyTimers.has(s.id)) continue;
       const recentOutput = s.lastDataAt && (now - s.lastDataAt) < BUSY_THRESHOLD_MS;
       if (recentOutput) {
         // Active output — immediately mark as busy, reset idle counter
@@ -1485,11 +1572,8 @@ async function updateSessionBusyStates() {
     sessionAliveState.clear();
     for (const id of newAlive) sessionAliveState.add(id);
     // Clear stale entries
-    for (const id of sessionBusyState.keys()) {
-      if (!newAlive.has(id)) {
-        sessionBusyState.delete(id);
-        sessionIdleCount.delete(id);
-      }
+    for (const id of [...sessionBusyState.keys(), ...sessionBusyTimers.keys()]) {
+      if (!newAlive.has(id)) clearSessionBusy(id);
     }
   } catch {}
 }
@@ -1501,7 +1585,7 @@ function patchSessionStateBadges() {
     if (!session) return;
 
     const isRunning = sessionAliveState.has(sessionId);
-    const hasPR = session.resources && session.resources.some(r => r.type === 'pr' && (!r.state || r.state === 'active'));
+    const hasPR = session.lastAssistantHasPR === true;
     const { label, cls, tip } = deriveSessionState({
       isRunning,
       isActive: sessionId === activeSessionId,
@@ -1535,7 +1619,7 @@ function patchSessionStateBadgeForId(sessionId) {
   if (!session) return;
 
   const isRunning = sessionAliveState.has(sessionId);
-  const hasPR = session.resources && session.resources.some(r => r.type === 'pr' && (!r.state || r.state === 'active'));
+  const hasPR = session.lastAssistantHasPR === true;
   const { label, cls, tip } = deriveSessionState({
     isRunning,
     isActive: sessionId === activeSessionId,
@@ -1657,7 +1741,7 @@ function createSessionItem(session, group, index) {
   }
 
   const isRunning = sessionAliveState.has(session.id);
-  const hasPR = session.resources && session.resources.some(r => r.type === 'pr' && (!r.state || r.state === 'active'));
+  const hasPR = session.lastAssistantHasPR === true;
   const { label: stateLabel, cls: stateCls, tip: stateTip } = deriveSessionState({
     isRunning,
     isActive: session.id === activeSessionId,
@@ -1666,11 +1750,12 @@ function createSessionItem(session, group, index) {
     isBusy: sessionBusyState.get(session.id) || false
   });
 
-  // Truncate cwd for display — show last folder name or short path
+  // Folder picker as a positioned icon button at the bottom-right of the
+  // session card (replaces the old "📂 <truncated path>" meta line). The
+  // full path is exposed via the tooltip on hover.
   let cwdHtml = '';
   if (session.cwd) {
-    const cwdDisplay = shortenPath(session.cwd);
-    cwdHtml = `<span class="session-cwd" role="button" tabindex="0" data-session-id="${session.id}" title="${escapeHtml(session.cwd)}">📂 ${escapeHtml(cwdDisplay)}</span>`;
+    cwdHtml = `<button class="session-cwd" type="button" tabindex="0" data-session-id="${session.id}" title="${escapeHtml(session.cwd)}" aria-label="Change working directory: ${escapeHtml(session.cwd)}">📂</button>`;
   }
 
   el.innerHTML = `
@@ -1679,8 +1764,9 @@ function createSessionItem(session, group, index) {
       <div class="session-title" data-title="${escapeHtml(session.title)}">${escapeHtml(session.title)}</div>
       <span class="session-state ${stateCls}" title="${escapeHtml(stateTip)}">${stateLabel}</span>
     </div>
-    <div class="session-meta"><span>${timeStr}</span>${cwdHtml}</div>
+    <div class="session-meta"><span>${timeStr}</span></div>
     ${tagsHtml}
+    ${cwdHtml}
     ${currentSidebarTab === 'history' ? '<button class="session-delete" title="Delete session">✕</button>' : ''}
     ${currentSidebarTab === 'active' && isRunning ? '<button class="session-close" tabindex="-1" title="Close session">✕</button>' : ''}
   `;
@@ -2339,6 +2425,11 @@ function addTab(sessionId, title) {
   });
 
   tabsScrollArea.appendChild(tab);
+  // Keep the top tab strip in the same order as the sidebar so Ctrl+Tab and
+  // visual neighbor relationships match what the user reordered. New tabs
+  // land at the end of sessionOrder via ensureSessionOrder, so this is
+  // typically a no-op for the new tab but corrects any prior drift.
+  syncTabStripOrder();
   updateTabScrollButtons();
 }
 
@@ -2410,8 +2501,7 @@ async function terminateSession(sessionId, { rememberClosedTab = false } = {}) {
   removeTabUi(sessionId);
   tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
   sessionAliveState.delete(sessionId);
-  sessionBusyState.delete(sessionId);
-  sessionIdleCount.delete(sessionId);
+  clearSessionBusy(sessionId);
   cwdChangingSessions.delete(sessionId);
 
   if (activeSessionId === sessionId) {
@@ -2447,6 +2537,34 @@ function ensureSessionOrder() {
   }
   // Remove closed sessions
   sessionOrder = sessionOrder.filter(id => activeIds.has(id));
+}
+
+// Reorder the DOM children of the top tab strip to match sessionOrder so the
+// strip, the sidebar, and Ctrl+Tab cycling all agree on a single ordering.
+// Tabs whose sessionId isn't in sessionOrder (e.g., transient/special UI
+// tabs) keep their relative position at the end and are not dropped.
+function syncTabStripOrder() {
+  if (!tabsScrollArea) return;
+  ensureSessionOrder();
+  const tabs = [...tabsScrollArea.querySelectorAll(':scope > .tab')];
+  if (tabs.length < 2) return;
+  const orderIndex = new Map(sessionOrder.map((id, i) => [id, i]));
+  const sorted = [...tabs].sort((a, b) => {
+    const ai = orderIndex.has(a.dataset.sessionId) ? orderIndex.get(a.dataset.sessionId) : Number.MAX_SAFE_INTEGER;
+    const bi = orderIndex.has(b.dataset.sessionId) ? orderIndex.get(b.dataset.sessionId) : Number.MAX_SAFE_INTEGER;
+    if (ai !== bi) return ai - bi;
+    // Stable fallback for tabs not tracked by sessionOrder: preserve their
+    // existing relative order so nothing visibly jumps around.
+    return tabs.indexOf(a) - tabs.indexOf(b);
+  });
+  let changed = false;
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i] !== tabs[i]) { changed = true; break; }
+  }
+  if (!changed) return;
+  // appendChild on an existing child moves it; doing this for each tab in
+  // sorted order reorders them without cloning or losing event listeners.
+  for (const t of sorted) tabsScrollArea.appendChild(t);
 }
 
 function handleSessionReorder(draggedId, targetId, insertAbove, targetGroup) {
@@ -2486,6 +2604,9 @@ function handleSessionReorder(draggedId, targetId, insertAbove, targetGroup) {
     sessionOrder.push(draggedId);
   }
 
+  // Mirror the new order in the top tab strip so Ctrl+Tab cycles in
+  // the same sequence the user just arranged in the sidebar.
+  syncTabStripOrder();
   renderSessionList();
   saveTabState();
 }

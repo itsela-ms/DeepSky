@@ -466,6 +466,76 @@ describe('SessionService', () => {
       const prompt = await svc.getLastUserPrompt('last-prompt');
       expect(prompt).toBe('Second prompt with more detail');
     });
+
+    it('truncates to 160 chars by default but returns the full prompt with { full: true }', async () => {
+      const long = 'q'.repeat(500);
+      await createSession('full-prompt', 'summary: full prompt', {
+        events: [{ type: 'user.message', data: { content: long } }]
+      });
+
+      const truncated = await svc.getLastUserPrompt('full-prompt');
+      expect(truncated.length).toBe(160);
+      expect(truncated.endsWith('...')).toBe(true);
+
+      const full = await svc.getLastUserPrompt('full-prompt', { full: true });
+      expect(full).toBe(long);
+      expect(full.length).toBe(500);
+    });
+  });
+
+  describe('lastAssistantHasPR', () => {
+    it('is true when the latest assistant.message contains a GitHub PR URL', async () => {
+      await createSession('pr-github', 'summary: github pr', {
+        events: [
+          { type: 'user.message', data: { content: 'open a pr' } },
+          { type: 'assistant.message', data: { content: 'Opened https://github.com/owner/repo/pull/42 for review' } }
+        ]
+      });
+      const [s] = await svc.listSessions();
+      expect(s.lastAssistantHasPR).toBe(true);
+    });
+
+    it('is true when the latest assistant.message contains an Azure DevOps PR URL', async () => {
+      await createSession('pr-ado', 'summary: ado pr', {
+        events: [
+          { type: 'user.message', data: { content: 'open a pr' } },
+          { type: 'assistant.message', data: { content: 'Opened https://dev.azure.com/foo/_git/bar/pullrequest/77 for review' } }
+        ]
+      });
+      const [s] = await svc.listSessions();
+      expect(s.lastAssistantHasPR).toBe(true);
+    });
+
+    it('is false when only an earlier assistant.message had the PR URL', async () => {
+      await createSession('pr-earlier', 'summary: stale pr', {
+        events: [
+          { type: 'user.message', data: { content: 'open a pr' } },
+          { type: 'assistant.message', data: { content: 'Opened https://github.com/o/r/pull/1 for review' } },
+          { type: 'user.message', data: { content: 'now do something else' } },
+          { type: 'assistant.message', data: { content: 'OK, refactored utils.js — no PR yet, want me to open one?' } }
+        ]
+      });
+      const [s] = await svc.listSessions();
+      expect(s.lastAssistantHasPR).toBe(false);
+    });
+
+    it('is false when the latest assistant message has no PR but a tool.execution_complete after it mentions one (PR text in tool output should not count)', async () => {
+      await createSession('pr-tool-only', 'summary: tool pr', {
+        events: [
+          { type: 'user.message', data: { content: 'look at this PR' } },
+          { type: 'assistant.message', data: { content: 'Looking now — give me a moment.' } },
+          { type: 'tool.execution_complete', data: { result: { content: 'https://github.com/o/r/pull/9' } } }
+        ]
+      });
+      const [s] = await svc.listSessions();
+      expect(s.lastAssistantHasPR).toBe(false);
+    });
+
+    it('is false for sessions with no events.jsonl', async () => {
+      await createSession('pr-no-events', 'summary: no events');
+      const [s] = await svc.listSessions();
+      expect(s.lastAssistantHasPR).toBe(false);
+    });
   });
 
   describe('cleanEmptySessions', () => {
