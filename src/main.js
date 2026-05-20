@@ -277,6 +277,12 @@ if (!hasSingleInstanceLock) {
   });
 
   // IPC: Start a new session
+  // Returns { sessionId, bufferedData } — bufferedData is any pre-warm output
+  // accumulated by a claimed standby pty. The renderer writes it to the xterm
+  // AFTER creating the terminal so it cannot race with `pty:data` events that
+  // would otherwise arrive before the terminal exists (which silently dropped
+  // the initial CLI output and left the terminal in alt-buffer mode with no
+  // scrollback, making it appear "non-scrollable" until /restart redrew it).
   ipcMain.handle('session:new', async (event, cwd) => {
     const sessionSupport = getNewSessionSupport(settingsService.get());
     if (!sessionSupport.available) {
@@ -289,15 +295,11 @@ if (!hasSingleInstanceLock) {
     if (claimed) {
       if (cwd) await sessionService.saveCwd(claimed.id, cwd);
       await sessionService.saveLauncher(claimed.id, launcher);
-      // Flush buffered startup output to renderer
-      if (claimed.bufferedData.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('pty:data', {
-          sessionId: claimed.id,
-          data: claimed.bufferedData.join('')
-        });
-      }
       scheduleWarmUp();
-      return claimed.id;
+      return {
+        sessionId: claimed.id,
+        bufferedData: claimed.bufferedData.length > 0 ? claimed.bufferedData.join('') : '',
+      };
     }
 
     // Cold start fallback
@@ -307,7 +309,7 @@ if (!hasSingleInstanceLock) {
     }
     await sessionService.saveLauncher(sessionId, launcher);
     scheduleWarmUp();
-    return sessionId;
+    return { sessionId, bufferedData: '' };
   });
 
   // IPC: Pick a directory (native OS dialog)

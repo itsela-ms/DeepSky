@@ -790,7 +790,7 @@ async function init() {
     }
     sessionAliveState.add(sessionId);
     sessionBusyState.set(sessionId, true);
-    patchSessionStateBadges();
+    schedulePatchSessionStateBadges(sessionId);
   }));
   ipcCleanups.push(window.api.onRestoreTabShortcut(() => {
     void restoreMostRecentClosedTab();
@@ -832,7 +832,7 @@ async function init() {
     sessionIdleCount.delete(sessionId);
     cwdChangingSessions.delete(sessionId);
     updateTabStatus(sessionId, false);
-    patchSessionStateBadges();
+    schedulePatchSessionStateBadges(sessionId);
   }));
 
   const evictedUnsub = window.api.onPtyEvicted?.((sessionId) => {
@@ -1519,6 +1519,70 @@ function patchSessionStateBadges() {
   });
 }
 
+// Patch a single session's badge without scanning the entire sidebar.
+// Used by schedulePatchSessionStateBadges to keep per-chunk pty:data updates
+// cheap (O(1) per session instead of O(N) DOM scans on every chunk).
+function patchSessionStateBadgeForId(sessionId) {
+  if (!sessionId) return;
+  let el = null;
+  try {
+    el = sessionList.querySelector(`.session-item[data-session-id="${CSS.escape(sessionId)}"]`);
+  } catch {
+    return;
+  }
+  if (!el) return;
+  const session = allSessions.find(s => s.id === sessionId);
+  if (!session) return;
+
+  const isRunning = sessionAliveState.has(sessionId);
+  const hasPR = session.resources && session.resources.some(r => r.type === 'pr' && (!r.state || r.state === 'active'));
+  const { label, cls, tip } = deriveSessionState({
+    isRunning,
+    isActive: sessionId === activeSessionId,
+    hasPR,
+    isHistory: currentSidebarTab === 'history',
+    isBusy: sessionBusyState.get(sessionId) || false
+  });
+
+  const badge = el.querySelector('.session-state');
+  if (badge && (badge.textContent !== label || !badge.classList.contains(cls))) {
+    badge.className = 'session-state ' + cls;
+    badge.textContent = label;
+    badge.title = tip;
+  }
+}
+
+// Coalesce badge updates into a single requestAnimationFrame tick.
+// - schedulePatchSessionStateBadges()        → full sidebar scan next frame
+// - schedulePatchSessionStateBadges(id)      → patch only that session next frame
+// Without this, patchSessionStateBadges() runs on every 16ms-batched pty chunk
+// (≈60×/sec per active session), each doing a full document-wide DOM scan.
+let _badgeRafToken = null;
+let _badgeFullSyncScheduled = false;
+const _badgePendingSessionIds = new Set();
+function schedulePatchSessionStateBadges(sessionId = null) {
+  if (sessionId) {
+    _badgePendingSessionIds.add(sessionId);
+  } else {
+    _badgeFullSyncScheduled = true;
+  }
+  if (_badgeRafToken !== null) return;
+  _badgeRafToken = requestAnimationFrame(() => {
+    _badgeRafToken = null;
+    if (_badgeFullSyncScheduled) {
+      _badgeFullSyncScheduled = false;
+      _badgePendingSessionIds.clear();
+      patchSessionStateBadges();
+      return;
+    }
+    if (_badgePendingSessionIds.size > 0) {
+      const ids = [..._badgePendingSessionIds];
+      _badgePendingSessionIds.clear();
+      for (const id of ids) patchSessionStateBadgeForId(id);
+    }
+  });
+}
+
 async function pollSessionStatus() {
   if (terminals.size > 0) {
     await refreshSessionList();
@@ -2046,9 +2110,25 @@ async function newSession() {
       cwd = settings.defaultWorkdir;
     }
 
-    const sessionId = await window.api.newSession(cwd);
+    const result = await window.api.newSession(cwd);
+    // session:new now returns { sessionId, bufferedData } so we can write the
+    // pre-warm CLI output AFTER createTerminal, avoiding the race where a
+    // 'pty:data' event arrived before terminals.get(sessionId) was defined
+    // and was silently dropped (which left the terminal in alt-buffer mode
+    // with empty scrollback, appearing "non-scrollable" until /restart).
+    const sessionId = typeof result === 'string' ? result : result?.sessionId;
+    const bufferedData = typeof result === 'string' ? '' : (result?.bufferedData || '');
+    if (!sessionId) throw new Error('Failed to start session.');
     sessionAliveState.add(sessionId);
     createTerminal(sessionId);
+    if (bufferedData) {
+      const termEntry = terminals.get(sessionId);
+      if (termEntry) {
+        termEntry.terminal.write(bufferedData, () => {
+          scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+        });
+      }
+    }
     switchToSession(sessionId);
     addTab(sessionId, 'New Session');
 
@@ -2246,7 +2326,7 @@ function addTab(sessionId, title) {
   const closeBtn = document.createElement('span');
   closeBtn.className = 'tab-close';
   closeBtn.textContent = '×';
-  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closeTab(sessionId); });
+  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); terminateSession(sessionId, { rememberClosedTab: true }); });
 
   tab.appendChild(titleSpan);
   tab.appendChild(closeBtn);
@@ -2254,7 +2334,7 @@ function addTab(sessionId, title) {
   tab.addEventListener('mousedown', (e) => {
     if (e.button === 1) { // Middle mouse button
       e.preventDefault();
-      closeTab(sessionId);
+      terminateSession(sessionId, { rememberClosedTab: true });
     }
   });
 
@@ -2441,7 +2521,7 @@ function removeGroup(groupId, closeTabs) {
   if (!group) return;
   if (closeTabs) {
     for (const tabId of [...group.tabIds]) {
-      closeTab(tabId);
+      terminateSession(tabId, { rememberClosedTab: true });
     }
   }
   tabGroups = tabGroups.filter(g => g.id !== groupId);
@@ -4070,7 +4150,7 @@ document.addEventListener('keydown', (e) => {
         return;
       }
       case 'close-tab':
-        if (activeSessionId) closeTab(activeSessionId);
+        if (activeSessionId) terminateSession(activeSessionId, { rememberClosedTab: true });
         return;
       case 'restore-tab':
         void restoreMostRecentClosedTab();

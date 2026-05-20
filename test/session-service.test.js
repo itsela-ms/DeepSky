@@ -288,6 +288,78 @@ describe('SessionService', () => {
     });
   });
 
+  describe('_loadSession cache', () => {
+    // The cache avoids re-parsing workspace.yaml / streaming events.jsonl for
+    // sessions that haven't changed between polls. These tests verify both the
+    // fingerprint-based fast path AND the explicit invalidation on mutations.
+    it('returns the same object reference on consecutive listSessions when nothing changes', async () => {
+      await createSession('cache-stable', 'name: Cached Name\nsummary: test');
+      const first = await svc.listSessions();
+      const second = await svc.listSessions();
+      const a = first.find(s => s.id === 'cache-stable');
+      const b = second.find(s => s.id === 'cache-stable');
+      expect(a).toBe(b); // identity == proves the cache hit
+    });
+
+    it('invalidates the cache after renameSession', async () => {
+      await createSession('cache-rename', 'name: Original\nsummary: test');
+      const first = await svc.listSessions();
+      const initial = first.find(s => s.id === 'cache-rename');
+      expect(initial.title).toBe('Original');
+
+      await svc.renameSession('cache-rename', 'Renamed');
+      const second = await svc.listSessions();
+      const updated = second.find(s => s.id === 'cache-rename');
+      expect(updated.title).toBe('Renamed');
+      expect(updated).not.toBe(initial); // cache miss → fresh object
+    });
+
+    it('invalidates the cache after saveCwd', async () => {
+      await createSession('cache-cwd', 'cwd: /old\nname: t\nsummary: test');
+      const first = await svc.listSessions();
+      expect(first.find(s => s.id === 'cache-cwd').cwd).toBe('/old');
+
+      await svc.saveCwd('cache-cwd', '/new');
+      const second = await svc.listSessions();
+      expect(second.find(s => s.id === 'cache-cwd').cwd).toBe('/new');
+    });
+
+    it('invalidates the cache after clearCwd', async () => {
+      await createSession('cache-clear', 'cwd: /old\nname: t\nsummary: test');
+      const first = await svc.listSessions();
+      expect(first.find(s => s.id === 'cache-clear').cwd).toBe('/old');
+
+      await svc.clearCwd('cache-clear');
+      const second = await svc.listSessions();
+      expect(second.find(s => s.id === 'cache-clear').cwd).toBe('');
+    });
+
+    it('invalidates the cache after deleteSession', async () => {
+      await createSession('cache-delete', 'name: ToDelete\nsummary: test');
+      const first = await svc.listSessions();
+      expect(first.some(s => s.id === 'cache-delete')).toBe(true);
+
+      await svc.deleteSession('cache-delete');
+      const second = await svc.listSessions();
+      expect(second.some(s => s.id === 'cache-delete')).toBe(false);
+    });
+
+    it('detects external workspace.yaml changes (mtime-based invalidation)', async () => {
+      await createSession('cache-external', 'name: Before\nsummary: test');
+      const first = await svc.listSessions();
+      expect(first.find(s => s.id === 'cache-external').title).toBe('Before');
+
+      // Simulate an external write (Copilot updating workspace.yaml on its own).
+      // Bump mtime explicitly to defeat sub-millisecond mtime resolution edge cases.
+      await writeWorkspaceYaml('cache-external', 'name: After\nsummary: test');
+      const future = new Date(Date.now() + 5000);
+      await fs.promises.utimes(path.join(tmpDir, 'cache-external', 'workspace.yaml'), future, future);
+
+      const second = await svc.listSessions();
+      expect(second.find(s => s.id === 'cache-external').title).toBe('After');
+    });
+  });
+
   describe('launcher persistence', () => {
     it('defaults launcher to copilot when unset', async () => {
       await createSession('launcher-default', 'summary: launcher default');

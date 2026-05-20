@@ -8,6 +8,18 @@ class SessionService {
   constructor(sessionStateDir) {
     this.dir = sessionStateDir;
     this.m_workspaceMetaWrites = new Map();
+    // Cache _loadSession results keyed by entry.name.
+    // value = { fingerprint, session } where fingerprint encodes per-file
+    // {mtimeMs,size} for workspace.yaml, .deepsky-title, .deepsky-cwd,
+    // events.jsonl, plus the session dir. Cache hits skip YAML parsing,
+    // events.jsonl streaming, and cwd resolution — a meaningful win when
+    // pollSessionStatus fires every 3s and most sessions haven't changed.
+    this._sessionCache = new Map();
+  }
+
+  _invalidateSessionCache(sessionId) {
+    if (!sessionId) return;
+    this._sessionCache.delete(sessionId);
   }
 
   _getSessionDir(sessionId) {
@@ -56,6 +68,7 @@ class SessionService {
         const meta = await this._readWorkspaceMeta(sessionDir);
         const updated = await updater({ ...meta });
         await this._writeWorkspaceMeta(sessionDir, updated);
+        this._invalidateSessionCache(sessionId);
         return updated;
       });
 
@@ -92,6 +105,25 @@ class SessionService {
     return stats
       .filter(result => result.status === 'fulfilled')
       .reduce((max, result) => Math.max(max, result.value.mtimeMs), 0);
+  }
+
+  // Compute a per-file fingerprint for cache invalidation in _loadSession.
+  // Includes {mtimeMs,size} for every file _loadSession reads. Using a tuple
+  // (not just max-mtime) means a change to ANY relevant file invalidates the
+  // cache, even if another file is newer. Size guards against same-mtime
+  // overwrites that can happen at the OS timestamp resolution boundary.
+  async _computeSessionFingerprint(sessionDir) {
+    const candidates = [
+      sessionDir,
+      path.join(sessionDir, 'workspace.yaml'),
+      path.join(sessionDir, '.deepsky-title'),
+      path.join(sessionDir, '.deepsky-cwd'),
+      path.join(sessionDir, 'events.jsonl'),
+    ];
+    const stats = await Promise.allSettled(candidates.map(p => fs.promises.stat(p)));
+    return stats
+      .map(r => (r.status === 'fulfilled' ? `${r.value.mtimeMs}:${r.value.size}` : '_'))
+      .join('|');
   }
 
   async listSessions(options = {}) {
@@ -157,6 +189,20 @@ class SessionService {
   async _loadSession(entry, lastModifiedHint = 0) {
     const sessionDir = path.join(this.dir, entry.name);
     const yamlPath = path.join(sessionDir, 'workspace.yaml');
+
+    // Fast path: if the fingerprint matches the cached one, none of the files
+    // _loadSession reads have changed, so we can reuse the previous result.
+    const fingerprint = await this._computeSessionFingerprint(sessionDir).catch(() => null);
+    if (fingerprint) {
+      const cached = this._sessionCache.get(entry.name);
+      if (cached && cached.fingerprint === fingerprint) {
+        const hint = Number(lastModifiedHint) || 0;
+        if (hint > cached.session.lastModified) {
+          return { ...cached.session, lastModified: hint };
+        }
+        return cached.session;
+      }
+    }
 
     try {
       const [yamlContent, yamlStat] = await Promise.all([
@@ -227,7 +273,7 @@ class SessionService {
 
       const stat = await fs.promises.stat(sessionDir);
       const lastModified = Math.max(stat.mtimeMs, yamlStat.mtimeMs, Number(lastModifiedHint) || 0);
-      return {
+      const session = {
         id: entry.name,
         title,
         cwd,
@@ -235,8 +281,13 @@ class SessionService {
         updatedAt: meta.updated_at || new Date(lastModified).toISOString(),
         lastModified,
       };
+      if (fingerprint) {
+        this._sessionCache.set(entry.name, { fingerprint, session });
+      }
+      return session;
     } catch {
       // Skip sessions with unreadable metadata
+      this._sessionCache.delete(entry.name);
       return null;
     }
   }
@@ -550,10 +601,12 @@ class SessionService {
             const meta = yaml.load(yamlContent);
             if (!meta.summary) {
               await fs.promises.rm(sessionDir, { recursive: true, force: true });
+              this._invalidateSessionCache(entry.name);
               cleaned++;
             }
           } catch {
             await fs.promises.rm(sessionDir, { recursive: true, force: true });
+            this._invalidateSessionCache(entry.name);
             cleaned++;
           }
           continue;
@@ -568,10 +621,12 @@ class SessionService {
             const meta = yaml.load(yamlContent);
             if (!meta.summary) {
               await fs.promises.rm(sessionDir, { recursive: true, force: true });
+              this._invalidateSessionCache(entry.name);
               cleaned++;
             }
           } catch {
             await fs.promises.rm(sessionDir, { recursive: true, force: true });
+            this._invalidateSessionCache(entry.name);
             cleaned++;
           }
         }
@@ -590,6 +645,7 @@ class SessionService {
       cwd: cwd.trim(),
     }));
     await fs.promises.rm(path.join(sessionDir, '.deepsky-cwd'), { force: true }).catch(() => {});
+    this._invalidateSessionCache(sessionId);
   }
 
   async clearCwd(sessionId) {
@@ -601,6 +657,7 @@ class SessionService {
     try {
       await fs.promises.rm(path.join(sessionDir, '.deepsky-cwd'), { force: true });
     } catch {}
+    this._invalidateSessionCache(sessionId);
   }
 
   async getCwd(sessionId) {
@@ -634,11 +691,13 @@ class SessionService {
       name: title.trim(),
     }));
     await fs.promises.rm(path.join(sessionDir, '.deepsky-title'), { force: true }).catch(() => {});
+    this._invalidateSessionCache(sessionId);
   }
 
   async deleteSession(sessionId) {
     const sessionDir = this._getSessionDir(sessionId);
     await fs.promises.rm(sessionDir, { recursive: true, force: true });
+    this._invalidateSessionCache(sessionId);
   }
 }
 
