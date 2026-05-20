@@ -828,7 +828,13 @@ async function init() {
       });
     }
     sessionAliveState.add(sessionId);
-    markSessionBusy(sessionId);
+    // Only treat the chunk as "agent thinking" if it carries real printable
+    // content. Filters out cursor blinks, spinner-only frames without any
+    // status text, and idle redraws that would otherwise flicker the
+    // Working badge once per second.
+    if (chunkLooksLikeAgentActivity(data)) {
+      markSessionBusy(sessionId);
+    }
     schedulePatchSessionStateBadges(sessionId);
   }));
   ipcCleanups.push(window.api.onRestoreTabShortcut(() => {
@@ -1505,8 +1511,38 @@ const IDLE_GRACE_POLLS = 1;
 // Waiting. Tuned so brief spinner pauses during streaming don't toggle the
 // badge, while users still see "Waiting" almost immediately when the agent
 // stops responding.
-const BUSY_DEBOUNCE_MS = 1200;
+const BUSY_DEBOUNCE_MS = 2000;
+// Copilot CLI emits ambient pty:data chunks while *idle* — cursor blinks,
+// input-area redraws, hint text refreshes — that are mostly ANSI escape
+// sequences with little or no printable content. If every chunk reset the
+// busy debounce timer, the Working badge would re-arm on every cursor blink
+// and flicker between Working/Waiting forever. We strip ANSI and require a
+// minimum amount of *real* printable content before treating a chunk as
+// agent activity. Real model output streams many characters per chunk; the
+// spinner with a status line (e.g. "⠋ Reasoning...") still easily exceeds
+// this threshold. A solitary keystroke echo (1-2 chars) does not.
+const BUSY_MIN_PRINTABLE_CHARS = 6;
+const ANSI_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])/g;
 const sessionIdleCount = new Map();
+
+function chunkLooksLikeAgentActivity(data) {
+  let text = data;
+  if (typeof text !== 'string') {
+    if (text && typeof text.toString === 'function') text = text.toString('utf8');
+    else return false;
+  }
+  if (!text) return false;
+  const stripped = text.replace(ANSI_ESCAPE_RE, '');
+  let printable = 0;
+  for (let i = 0; i < stripped.length; i++) {
+    const code = stripped.charCodeAt(i);
+    // Skip ASCII control chars (0x00–0x1F including \r \n \t) and DEL.
+    if (code <= 0x20 || code === 0x7f) continue;
+    printable++;
+    if (printable >= BUSY_MIN_PRINTABLE_CHARS) return true;
+  }
+  return false;
+}
 
 // Centralized cleanup so every "session is gone / not busy anymore" code
 // path stays in sync (timer + busy flag + idle counter). The previous
@@ -1552,19 +1588,28 @@ async function updateSessionBusyStates() {
       // race with it (would cause Working badge to flicker).
       if (sessionBusyTimers.has(s.id)) continue;
       const recentOutput = s.lastDataAt && (now - s.lastDataAt) < BUSY_THRESHOLD_MS;
-      if (recentOutput) {
-        // Active output — immediately mark as busy, reset idle counter
-        sessionBusyState.set(s.id, true);
-        sessionIdleCount.delete(s.id);
-      } else if (sessionBusyState.get(s.id)) {
-        // Was busy, now idle — require sustained idle before flipping
-        const count = (sessionIdleCount.get(s.id) || 0) + 1;
-        sessionIdleCount.set(s.id, count);
-        if (count >= IDLE_GRACE_POLLS) {
-          sessionBusyState.set(s.id, false);
+      const wasBusy = sessionBusyState.get(s.id) === true;
+      const wasKnown = sessionBusyState.has(s.id);
+      if (wasBusy) {
+        // Decay only — the per-session debounce timer (markSessionBusy) is
+        // the only path that *establishes* busy=true. Without this, every
+        // ambient pty chunk recorded by main.js (cursor blinks, etc.) would
+        // re-flip the badge here and cause Working/Waiting flicker.
+        if (recentOutput) {
           sessionIdleCount.delete(s.id);
+        } else {
+          const count = (sessionIdleCount.get(s.id) || 0) + 1;
+          sessionIdleCount.set(s.id, count);
+          if (count >= IDLE_GRACE_POLLS) {
+            sessionBusyState.set(s.id, false);
+            sessionIdleCount.delete(s.id);
+          }
         }
-      } else {
+      } else if (!wasKnown && recentOutput) {
+        // Bootstrap: renderer attached after the session was already
+        // producing output, so the debounce timer never fired for it.
+        sessionBusyState.set(s.id, true);
+      } else if (!wasKnown) {
         sessionBusyState.set(s.id, false);
       }
     }
@@ -1755,7 +1800,7 @@ function createSessionItem(session, group, index) {
   // full path is exposed via the tooltip on hover.
   let cwdHtml = '';
   if (session.cwd) {
-    cwdHtml = `<button class="session-cwd" type="button" tabindex="0" data-session-id="${session.id}" title="${escapeHtml(session.cwd)}" aria-label="Change working directory: ${escapeHtml(session.cwd)}">📂</button>`;
+    cwdHtml = `<button class="session-cwd" type="button" tabindex="0" data-session-id="${session.id}" title="${escapeHtml(session.cwd)}" aria-label="Change working directory: ${escapeHtml(session.cwd)}"><svg class="session-cwd-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-2H5a2 2 0 0 0-2 2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>`;
   }
 
   el.innerHTML = `

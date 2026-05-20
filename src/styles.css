@@ -635,19 +635,28 @@ body {
   right: 8px;
   background: none;
   border: none;
-  padding: 2px 4px;
-  font-size: 13px;
-  line-height: 1;
-  color: var(--subtext0);
-  opacity: 0.55;
+  padding: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  opacity: 0.45;
   cursor: pointer;
   border-radius: 4px;
-  transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+
+.session-cwd-icon {
+  width: 13px;
+  height: 13px;
+  display: block;
+  pointer-events: none;
 }
 
 .session-cwd:hover,
 .session-cwd:focus-visible {
-  opacity: 1;
+  opacity: 0.95;
+  color: var(--text);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   outline: none;
 }

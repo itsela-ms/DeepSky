@@ -100,7 +100,11 @@ describe('per-session debounce timer makes Working → Waiting near-instant', ()
     // The old "wait 30 s before even considering idle" threshold is gone
     expect(renderer).not.toMatch(/BUSY_THRESHOLD_MS\s*=\s*30000/);
     expect(renderer).toMatch(/BUSY_THRESHOLD_MS\s*=\s*1500/);
-    expect(renderer).toMatch(/BUSY_DEBOUNCE_MS\s*=\s*1200/);
+    // Debounce is at least 1500ms — long enough to absorb brief spinner
+    // pauses without flicker.
+    const m = renderer.match(/BUSY_DEBOUNCE_MS\s*=\s*(\d+)/);
+    expect(m, 'BUSY_DEBOUNCE_MS must be declared').not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThanOrEqual(1500);
   });
 
   it('markSessionBusy sets busy=true, resets any pending timer, and schedules a flip to Waiting', () => {
@@ -127,10 +131,13 @@ describe('per-session debounce timer makes Working → Waiting near-instant', ()
     expect(body).toMatch(/sessionIdleCount\.delete\(sessionId\)/);
   });
 
-  it('pty:data listener invokes markSessionBusy (not the bare sessionBusyState.set)', () => {
+  it('pty:data listener invokes markSessionBusy (not the bare sessionBusyState.set) and only on substantive chunks', () => {
     const m = renderer.match(/window\.api\.onPtyData\(\(sessionId, data\) => \{[\s\S]*?\}\)\)/);
     expect(m, 'onPtyData listener body must be findable').not.toBeNull();
     const body = m[0];
+    // markSessionBusy must be gated by the chunk-substance filter so that
+    // cursor blinks and idle redraws don't flicker the badge.
+    expect(body).toMatch(/if\s*\(\s*chunkLooksLikeAgentActivity\(data\)\s*\)/);
     expect(body).toMatch(/markSessionBusy\(sessionId\)/);
     expect(body).not.toMatch(/sessionBusyState\.set\(sessionId,\s*true\)/);
   });
@@ -152,6 +159,101 @@ describe('per-session debounce timer makes Working → Waiting near-instant', ()
     expect(m, 'updateSessionBusyStates body must be findable').not.toBeNull();
     const body = m[0];
     expect(body).toMatch(/sessionBusyTimers\.has\(s\.id\)/);
+  });
+
+  it('updateSessionBusyStates only decays known-busy sessions and never elevates a session it has already set to false (preserves the timer as the sole busy=true authority, with one bootstrap exception)', () => {
+    const m = renderer.match(/async function updateSessionBusyStates[\s\S]*?\n\}/);
+    expect(m, 'updateSessionBusyStates body must be findable').not.toBeNull();
+    const body = m[0];
+    // The old "recentOutput → busy=true unconditionally" branch is gone.
+    expect(body).not.toMatch(/if\s*\(\s*recentOutput\s*\)\s*\{\s*\/\/[^\n]*\n\s*sessionBusyState\.set\(s\.id,\s*true\)/);
+    // The bootstrap path is gated on "the renderer hasn't recorded this
+    // session yet" so it only fires once when the renderer attaches to an
+    // already-running session.
+    expect(body).toMatch(/!wasKnown\s*&&\s*recentOutput/);
+    // Decay still consults IDLE_GRACE_POLLS so a single quiet poll cycle
+    // doesn't immediately demote a session to Waiting.
+    expect(body).toMatch(/IDLE_GRACE_POLLS/);
+  });
+});
+
+describe('chunkLooksLikeAgentActivity filters ambient pty noise', () => {
+  // Pull the helper out of the renderer source as standalone JS so we can
+  // exercise it in isolation. The renderer module itself depends on xterm
+  // + Electron globals that are painful to mock; the helper is a pure
+  // function so we can lift its source out for unit testing.
+  const ansiSrc = renderer.match(/const ANSI_ESCAPE_RE\s*=\s*\/[^;]*;/);
+  const minSrc = renderer.match(/const BUSY_MIN_PRINTABLE_CHARS\s*=\s*\d+;/);
+  const fnSrc = renderer.match(/function chunkLooksLikeAgentActivity\([\s\S]*?\n\}/);
+  let chunkLooksLikeAgentActivity;
+  if (ansiSrc && minSrc && fnSrc) {
+    // eslint-disable-next-line no-new-func
+    chunkLooksLikeAgentActivity = new Function(`${ansiSrc[0]}\n${minSrc[0]}\n${fnSrc[0]}\nreturn chunkLooksLikeAgentActivity;`)();
+  }
+
+  it('parses out of renderer source', () => {
+    expect(chunkLooksLikeAgentActivity, 'helper must be liftable from renderer.js').toBeTypeOf('function');
+  });
+
+  it('returns false for empty / nullish chunks', () => {
+    expect(chunkLooksLikeAgentActivity('')).toBe(false);
+    expect(chunkLooksLikeAgentActivity(null)).toBe(false);
+    expect(chunkLooksLikeAgentActivity(undefined)).toBe(false);
+  });
+
+  it('returns false for a bare cursor-blink ANSI sequence', () => {
+    // Just hide/show cursor — pure ambient redraw.
+    expect(chunkLooksLikeAgentActivity('\x1b[?25l\x1b[?25h')).toBe(false);
+  });
+
+  it('returns false for a clear-line + carriage-return idle redraw with no text', () => {
+    expect(chunkLooksLikeAgentActivity('\x1b[2K\r')).toBe(false);
+  });
+
+  it('returns false for a 1–2 char keystroke echo', () => {
+    expect(chunkLooksLikeAgentActivity('h')).toBe(false);
+    expect(chunkLooksLikeAgentActivity('hi')).toBe(false);
+  });
+
+  it('returns true for a spinner frame that carries a status line', () => {
+    // Real copilot CLI spinner: cursor move + glyph + " Reasoning..."
+    expect(chunkLooksLikeAgentActivity('\x1b[2K\r⠋ Reasoning...')).toBe(true);
+  });
+
+  it('returns true for a streamed assistant response chunk', () => {
+    expect(chunkLooksLikeAgentActivity('I think the answer is to refactor the helper')).toBe(true);
+  });
+
+  it('returns true for colored ANSI text with at least a few printable chars', () => {
+    expect(chunkLooksLikeAgentActivity('\x1b[32mDone!\x1b[0m')).toBe(false); // "Done!" = 5 chars, just under
+    expect(chunkLooksLikeAgentActivity('\x1b[32mFinished\x1b[0m')).toBe(true);
+  });
+
+  it('handles Buffer input by coercing to string', () => {
+    const buf = Buffer.from('Reasoning about edge cases');
+    expect(chunkLooksLikeAgentActivity(buf)).toBe(true);
+  });
+});
+
+describe('folder icon uses inline monochrome SVG (not the yellow 📂 emoji)', () => {
+  it('session card renders the cwd button with an SVG, not 📂', () => {
+    // The card render block: find the cwdHtml line.
+    const m = renderer.match(/cwdHtml\s*=\s*`[^`]*`/);
+    expect(m, 'cwdHtml assignment must be findable').not.toBeNull();
+    const tpl = m[0];
+    expect(tpl).toMatch(/<svg/);
+    expect(tpl).toMatch(/session-cwd-icon/);
+    expect(tpl).not.toMatch(/📂/);
+  });
+
+  it('CSS sizes the SVG and uses currentColor on a dim default', () => {
+    expect(css).toMatch(/\.session-cwd-icon\s*\{[\s\S]*?width:\s*1[1-4]px/);
+    expect(css).toMatch(/\.session-cwd\s*\{[\s\S]*?color:\s*var\(--text-dim\)/);
+    // Default opacity should be subtle (< 0.6) so the icon doesn't dominate.
+    const m = css.match(/\.session-cwd\s*\{[\s\S]*?opacity:\s*0?\.(\d+)/);
+    expect(m, 'session-cwd opacity rule must be findable').not.toBeNull();
+    const opacity = Number('0.' + m[1]);
+    expect(opacity).toBeLessThan(0.6);
   });
 });
 
