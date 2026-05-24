@@ -558,7 +558,7 @@ describe('PtyManager', () => {
           { sessionStateDir: tmp, discoveryTimeoutMs: 3000 }
         );
 
-        // We need REAL timers for the polling loop to advance
+        // Use real timers so the setTimeout below fires.
         vi.useRealTimers();
         const newSessionPromise = manager.newSession('/cwd');
         // Simulate the CLI creating its folder ~150ms after spawn

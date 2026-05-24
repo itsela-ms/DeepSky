@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld('api', {
   // Sessions
   listSessions: (options) => ipcRenderer.invoke('sessions:list', options),
   searchSessions: (query) => ipcRenderer.invoke('sessions:search', query),
-  getLastUserPrompt: (sessionId) => ipcRenderer.invoke('session:getLastUserPrompt', sessionId),
+  getLastUserPrompt: (sessionId, options) => ipcRenderer.invoke('session:getLastUserPrompt', sessionId, options),
   renameSession: (sessionId, title) => ipcRenderer.invoke('session:rename', sessionId, title),
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   addResource: (sessionId, url) => ipcRenderer.invoke('resource:add', sessionId, url),

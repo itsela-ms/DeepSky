@@ -8,6 +8,18 @@ class SessionService {
   constructor(sessionStateDir) {
     this.dir = sessionStateDir;
     this.m_workspaceMetaWrites = new Map();
+    // Cache _loadSession results keyed by entry.name.
+    // value = { fingerprint, session } where fingerprint encodes per-file
+    // {mtimeMs,size} for workspace.yaml, .deepsky-title, .deepsky-cwd,
+    // events.jsonl, plus the session dir. Cache hits skip YAML parsing,
+    // events.jsonl streaming, and cwd resolution — a meaningful win when
+    // pollSessionStatus fires every 3s and most sessions haven't changed.
+    this._sessionCache = new Map();
+  }
+
+  _invalidateSessionCache(sessionId) {
+    if (!sessionId) return;
+    this._sessionCache.delete(sessionId);
   }
 
   _getSessionDir(sessionId) {
@@ -56,6 +68,7 @@ class SessionService {
         const meta = await this._readWorkspaceMeta(sessionDir);
         const updated = await updater({ ...meta });
         await this._writeWorkspaceMeta(sessionDir, updated);
+        this._invalidateSessionCache(sessionId);
         return updated;
       });
 
@@ -92,6 +105,25 @@ class SessionService {
     return stats
       .filter(result => result.status === 'fulfilled')
       .reduce((max, result) => Math.max(max, result.value.mtimeMs), 0);
+  }
+
+  // Compute a per-file fingerprint for cache invalidation in _loadSession.
+  // Includes {mtimeMs,size} for every file _loadSession reads. Using a tuple
+  // (not just max-mtime) means a change to ANY relevant file invalidates the
+  // cache, even if another file is newer. Size guards against same-mtime
+  // overwrites that can happen at the OS timestamp resolution boundary.
+  async _computeSessionFingerprint(sessionDir) {
+    const candidates = [
+      sessionDir,
+      path.join(sessionDir, 'workspace.yaml'),
+      path.join(sessionDir, '.deepsky-title'),
+      path.join(sessionDir, '.deepsky-cwd'),
+      path.join(sessionDir, 'events.jsonl'),
+    ];
+    const stats = await Promise.allSettled(candidates.map(p => fs.promises.stat(p)));
+    return stats
+      .map(r => (r.status === 'fulfilled' ? `${r.value.mtimeMs}:${r.value.size}` : '_'))
+      .join('|');
   }
 
   async listSessions(options = {}) {
@@ -149,14 +181,91 @@ class SessionService {
       .map(r => r.value);
   }
 
-  async getLastUserPrompt(sessionId) {
+  async getLastUserPrompt(sessionId, options = {}) {
     const sessionDir = this._getSessionDir(sessionId);
-    return this._extractLastUserPromptFromEvents(sessionDir);
+    return this._extractLastUserPromptFromEvents(sessionDir, options);
+  }
+
+  /**
+   * Returns true if the LAST `assistant.message` event in events.jsonl
+   * contains a Pull Request URL (GitHub `/pull/<id>` or Azure DevOps
+   * `/pullrequest/<id>`). Used to drive the "Pending PR" status badge
+   * — fires only when the agent's most recent response surfaces a PR,
+   * not whenever any historical PR was ever mentioned.
+   */
+  async _extractLastAssistantHasPRFromEvents(sessionDir) {
+    const eventsPath = path.join(sessionDir, 'events.jsonl');
+    let stat;
+    try {
+      stat = await fs.promises.stat(eventsPath);
+    } catch {
+      return false;
+    }
+    if (!stat.size) return false;
+
+    const TAIL_BYTES = 256 * 1024; // 256KB tail covers most assistant messages
+    const PR_URL_RE = /\/pull\/\d+|\/pullrequest\/\d+/;
+    let scanLines = await this._readEventsTailLines(eventsPath, stat.size, TAIL_BYTES);
+
+    // If we never found a single assistant.message in the tail, widen to whole file
+    // (cheap fallback — events.jsonl is normally a few MB).
+    let widened = false;
+    while (true) {
+      for (let i = scanLines.length - 1; i >= 0; i--) {
+        let event;
+        try { event = JSON.parse(scanLines[i]); } catch { continue; }
+        if (event?.type !== 'assistant.message') continue;
+        // Found the last assistant message — check it (and only it) for PR URLs.
+        const texts = [];
+        this._collectVisibleAssistantTexts(event.data, (t) => texts.push(String(t || '')));
+        const blob = texts.join('\n');
+        return PR_URL_RE.test(blob);
+      }
+      if (widened) return false;
+      // Tail didn't contain any assistant.message — try reading the full file.
+      widened = true;
+      try {
+        const full = await fs.promises.readFile(eventsPath, 'utf8');
+        scanLines = full.split('\n').filter(Boolean);
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  async _readEventsTailLines(eventsPath, fileSize, tailBytes) {
+    const readSize = Math.min(fileSize, tailBytes);
+    const buf = Buffer.alloc(readSize);
+    const fh = await fs.promises.open(eventsPath, 'r');
+    try {
+      await fh.read(buf, 0, readSize, fileSize - readSize);
+    } finally {
+      await fh.close();
+    }
+    const text = buf.toString('utf8');
+    const lines = text.split('\n');
+    // If we started mid-file, the first line is almost certainly partial — drop it.
+    if (fileSize > tailBytes && lines.length > 1) lines.shift();
+    return lines.filter(Boolean);
   }
 
   async _loadSession(entry, lastModifiedHint = 0) {
     const sessionDir = path.join(this.dir, entry.name);
     const yamlPath = path.join(sessionDir, 'workspace.yaml');
+
+    // Fast path: if the fingerprint matches the cached one, none of the files
+    // _loadSession reads have changed, so we can reuse the previous result.
+    const fingerprint = await this._computeSessionFingerprint(sessionDir).catch(() => null);
+    if (fingerprint) {
+      const cached = this._sessionCache.get(entry.name);
+      if (cached && cached.fingerprint === fingerprint) {
+        const hint = Number(lastModifiedHint) || 0;
+        if (hint > cached.session.lastModified) {
+          return { ...cached.session, lastModified: hint };
+        }
+        return cached.session;
+      }
+    }
 
     try {
       const [yamlContent, yamlStat] = await Promise.all([
@@ -225,18 +334,28 @@ class SessionService {
 
       const cwd = await readPreferredSessionCwd(sessionDir);
 
+      // Cheap because events.jsonl mtime+size are already in the fingerprint
+      // above, so this only re-runs when new events land.
+      const lastAssistantHasPR = await this._extractLastAssistantHasPRFromEvents(sessionDir).catch(() => false);
+
       const stat = await fs.promises.stat(sessionDir);
       const lastModified = Math.max(stat.mtimeMs, yamlStat.mtimeMs, Number(lastModifiedHint) || 0);
-      return {
+      const session = {
         id: entry.name,
         title,
         cwd,
+        lastAssistantHasPR,
         createdAt: meta.created_at || stat.birthtime.toISOString(),
         updatedAt: meta.updated_at || new Date(lastModified).toISOString(),
         lastModified,
       };
+      if (fingerprint) {
+        this._sessionCache.set(entry.name, { fingerprint, session });
+      }
+      return session;
     } catch {
       // Skip sessions with unreadable metadata
+      this._sessionCache.delete(entry.name);
       return null;
     }
   }
@@ -495,7 +614,7 @@ class SessionService {
     });
   }
 
-  async _extractLastUserPromptFromEvents(sessionDir) {
+  async _extractLastUserPromptFromEvents(sessionDir, { full = false } = {}) {
     const eventsPath = path.join(sessionDir, 'events.jsonl');
     try {
       await fs.promises.access(eventsPath);
@@ -514,7 +633,7 @@ class SessionService {
           if (event.type !== 'user.message') return;
           const prompt = this._normalizeSearchText(event.data?.content || event.data?.transformedContent);
           if (!prompt) return;
-          lastPrompt = prompt.length > 160 ? `${prompt.slice(0, 157)}...` : prompt;
+          lastPrompt = (!full && prompt.length > 160) ? `${prompt.slice(0, 157)}...` : prompt;
         } catch {
           // Skip malformed lines
         }
@@ -550,10 +669,12 @@ class SessionService {
             const meta = yaml.load(yamlContent);
             if (!meta.summary) {
               await fs.promises.rm(sessionDir, { recursive: true, force: true });
+              this._invalidateSessionCache(entry.name);
               cleaned++;
             }
           } catch {
             await fs.promises.rm(sessionDir, { recursive: true, force: true });
+            this._invalidateSessionCache(entry.name);
             cleaned++;
           }
           continue;
@@ -568,10 +689,12 @@ class SessionService {
             const meta = yaml.load(yamlContent);
             if (!meta.summary) {
               await fs.promises.rm(sessionDir, { recursive: true, force: true });
+              this._invalidateSessionCache(entry.name);
               cleaned++;
             }
           } catch {
             await fs.promises.rm(sessionDir, { recursive: true, force: true });
+            this._invalidateSessionCache(entry.name);
             cleaned++;
           }
         }
@@ -590,6 +713,7 @@ class SessionService {
       cwd: cwd.trim(),
     }));
     await fs.promises.rm(path.join(sessionDir, '.deepsky-cwd'), { force: true }).catch(() => {});
+    this._invalidateSessionCache(sessionId);
   }
 
   async clearCwd(sessionId) {
@@ -601,6 +725,7 @@ class SessionService {
     try {
       await fs.promises.rm(path.join(sessionDir, '.deepsky-cwd'), { force: true });
     } catch {}
+    this._invalidateSessionCache(sessionId);
   }
 
   async getCwd(sessionId) {
@@ -634,11 +759,13 @@ class SessionService {
       name: title.trim(),
     }));
     await fs.promises.rm(path.join(sessionDir, '.deepsky-title'), { force: true }).catch(() => {});
+    this._invalidateSessionCache(sessionId);
   }
 
   async deleteSession(sessionId) {
     const sessionDir = this._getSessionDir(sessionId);
     await fs.promises.rm(sessionDir, { recursive: true, force: true });
+    this._invalidateSessionCache(sessionId);
   }
 }
 

@@ -2,6 +2,18 @@ const fs = require('fs');
 const path = require('path');
 const SAFE_COMMAND_NAME_RE = /^[a-zA-Z0-9._-]+$/;
 
+// Module-level cache for CLI path probes. resolveAgency/Copilot are called
+// on every settings:get, every session creation, and every warm-up — which
+// fires from pty:kill, so each Ctrl+W used to run 2x execSync('where ...').
+// Beyond the perf cost (~30–60ms per shellout on Windows), the synchronous
+// `where` child can EPIPE if its stdin pipe closes before Node finishes
+// closing the parent end, surfacing as an "Uncaught Exception" dialog.
+// These paths essentially never change while the app is running, so cache
+// the result for the process lifetime. Test paths inject `deps`, which
+// bypasses the cache entirely.
+const _commandPathCache = new Map();
+function _clearCommandPathCache() { _commandPathCache.clear(); }
+
 function isValidSessionId(sessionId) {
   return typeof sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(sessionId);
 }
@@ -16,7 +28,16 @@ function resolveCommandPath({
   for (const bin of names) {
     if (!SAFE_COMMAND_NAME_RE.test(bin)) continue;
     try {
-      const result = execSyncImpl(`where ${bin}`, { encoding: 'utf8', timeout: 5000 }).trim();
+      // stdio: ['ignore', 'pipe', 'ignore'] removes the stdin pipe entirely,
+      // which is what was EPIPE-ing on Windows when cmd.exe closed before
+      // Node's parent-side cleanup wrote its end-of-stream marker. The empty
+      // try/catch above only catches synchronous throws — the EPIPE was
+      // surfacing as an Electron uncaughtException dialog.
+      const result = execSyncImpl(`where ${bin}`, {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
       const firstMatch = result.split(/\r?\n/)[0];
       if (firstMatch && existsSync(firstMatch)) {
         return { path: firstMatch, found: true };
@@ -38,9 +59,13 @@ function resolveCopilotPath(deps = {}) {
 }
 
 function resolveCopilotInfo(deps = {}) {
+  const cacheable = !deps.execSync && !deps.existsSync && !deps.env;
+  if (cacheable && _commandPathCache.has('copilot')) {
+    return _commandPathCache.get('copilot');
+  }
   const { execSync } = deps.execSync ? deps : require('child_process');
   const env = deps.env || process.env;
-  return resolveCommandPath({
+  const result = resolveCommandPath({
     names: ['copilot.exe', 'copilot.cmd'],
     candidates: [
       path.join(env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'copilot.exe'),
@@ -51,12 +76,18 @@ function resolveCopilotInfo(deps = {}) {
     execSyncImpl: execSync,
     existsSync: deps.existsSync || fs.existsSync,
   });
+  if (cacheable) _commandPathCache.set('copilot', result);
+  return result;
 }
 
 function resolveAgencyInfo(deps = {}) {
+  const cacheable = !deps.execSync && !deps.existsSync && !deps.env;
+  if (cacheable && _commandPathCache.has('agency')) {
+    return _commandPathCache.get('agency');
+  }
   const { execSync } = deps.execSync ? deps : require('child_process');
   const env = deps.env || process.env;
-  return resolveCommandPath({
+  const result = resolveCommandPath({
     names: ['agency.exe', 'agency.cmd'],
     candidates: [
       path.join(env.APPDATA || '', 'agency', 'CurrentVersion', 'agency.exe'),
@@ -66,6 +97,8 @@ function resolveAgencyInfo(deps = {}) {
     execSyncImpl: execSync,
     existsSync: deps.existsSync || fs.existsSync,
   });
+  if (cacheable) _commandPathCache.set('agency', result);
+  return result;
 }
 
 function resolveBrochureInfo(deps = {}) {
@@ -153,4 +186,5 @@ module.exports = {
   resolveBrochureInfo,
   resolveCopilotInfo,
   resolveCopilotPath,
+  _clearCommandPathCache,
 };
