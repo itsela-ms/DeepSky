@@ -955,10 +955,16 @@ body {
 }
 
 .tab-close {
+  appearance: none;
   position: absolute;
   right: 6px;
   top: 50%;
   transform: translateY(-50%);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
   font-size: 18px;
   line-height: 1;
   width: 20px;
@@ -972,9 +978,11 @@ body {
   transition: opacity 0.15s, background 0.15s;
   flex-shrink: 0;
   color: var(--text-dim);
+  cursor: pointer;
 }
 
-.tab:hover .tab-close {
+.tab:hover .tab-close,
+.tab-close:focus-visible {
   opacity: 1;
   pointer-events: auto;
 }

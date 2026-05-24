@@ -39,6 +39,18 @@ describe('close-tab actions terminate the session', () => {
     expect(m[0]).not.toMatch(/\bcloseTab\(/);
   });
 
+  it('tab strip × close button is keyboard-accessible', () => {
+    const start = src.indexOf('function addTab(sessionId, title)');
+    const end = src.indexOf('\nfunction updateTabTitle', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+
+    expect(body).toContain("document.createElement('button')");
+    expect(body).toContain("closeBtn.type = 'button'");
+    expect(body).toMatch(/closeBtn\.setAttribute\('aria-label'/);
+  });
+
   it('tab middle-click calls terminateSession', () => {
     // The middle-click branch sits inside the tab mousedown handler.
     const m = src.match(/if \(e\.button === 1\)[^}]*\}/);
@@ -53,6 +65,50 @@ describe('close-tab actions terminate the session', () => {
     expect(m, 'expected removeGroup definition').not.toBeNull();
     expect(m[0]).toContain('terminateSession(tabId');
     expect(m[0]).toContain('rememberClosedTab: true');
+  });
+
+  it('terminateSession prunes sessionOrder before persisting tab state', () => {
+    const start = src.indexOf('async function terminateSession');
+    const end = src.indexOf('\nfunction updateTabStatus', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+
+    const deleteIdx = body.indexOf('sessionAliveState.delete(sessionId)');
+    const ensureIdx = body.indexOf('ensureSessionOrder()');
+    const saveIdx = body.indexOf('saveTabState()');
+    expect(deleteIdx).toBeGreaterThan(-1);
+    expect(ensureIdx).toBeGreaterThan(deleteIdx);
+    expect(saveIdx).toBeGreaterThan(ensureIdx);
+  });
+
+  it('pty exit prunes sessionOrder before the delayed tab-state save can run', () => {
+    const m = src.match(/window\.api\.onPtyExit\(\(sessionId, exitCode\) => \{[\s\S]*?\}\)\);/);
+    expect(m, 'expected onPtyExit listener').not.toBeNull();
+    const body = m[0];
+
+    const timeoutEndIdx = body.indexOf('}, 3000);');
+    expect(timeoutEndIdx).toBeGreaterThan(-1);
+    expect(body.indexOf('saveTabState()')).toBeGreaterThan(-1);
+
+    const tail = body.slice(timeoutEndIdx);
+    const deleteIdx = tail.indexOf('sessionAliveState.delete(sessionId)');
+    const ensureIdx = tail.indexOf('ensureSessionOrder()');
+    expect(deleteIdx).toBeGreaterThan(-1);
+    expect(ensureIdx).toBeGreaterThan(deleteIdx);
+  });
+
+  it('pty eviction prunes sessionOrder before persisting tab state', () => {
+    const m = src.match(/window\.api\.onPtyEvicted\?\.\(\(sessionId\) => \{[\s\S]*?\}\);/);
+    expect(m, 'expected onPtyEvicted listener').not.toBeNull();
+    const body = m[0];
+
+    const deleteIdx = body.indexOf('sessionAliveState.delete(sessionId)');
+    const ensureIdx = body.indexOf('ensureSessionOrder()');
+    const saveIdx = body.indexOf('saveTabState()');
+    expect(deleteIdx).toBeGreaterThan(-1);
+    expect(ensureIdx).toBeGreaterThan(deleteIdx);
+    expect(saveIdx).toBeGreaterThan(ensureIdx);
   });
 });
 

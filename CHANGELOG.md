@@ -4,6 +4,8 @@ All notable changes to DeepSky are documented here.
 
 ## [Unreleased]
 
+## [1.2.2-beta.1] - 2026-05-24
+
 ### Fixed
 - **Ctrl+W actually closes sessions again** — closing a tab now disposes the underlying pty/session as well as the tab UI; sidebar stays in sync.
 - **New session is scrollable from the first frame** — fixes a race where the terminal wasn't yet attached when initial output arrived, leaving the scrollback at the bottom with no way to scroll up until `/restart`.

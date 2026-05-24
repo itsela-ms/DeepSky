@@ -873,6 +873,7 @@ async function init() {
       }, 3000);
     }
     sessionAliveState.delete(sessionId);
+    ensureSessionOrder();
     clearSessionBusy(sessionId);
     cwdChangingSessions.delete(sessionId);
     updateTabStatus(sessionId, false);
@@ -881,6 +882,7 @@ async function init() {
 
   const evictedUnsub = window.api.onPtyEvicted?.((sessionId) => {
     sessionAliveState.delete(sessionId);
+    ensureSessionOrder();
     clearSessionBusy(sessionId);
     cwdChangingSessions.delete(sessionId);
     const entry = terminals.get(sessionId);
@@ -2454,9 +2456,12 @@ function addTab(sessionId, title) {
   titleSpan.textContent = title.length > 25 ? title.substring(0, 22) + '...' : title;
   titleSpan.title = title;
 
-  const closeBtn = document.createElement('span');
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
   closeBtn.className = 'tab-close';
   closeBtn.textContent = '×';
+  closeBtn.title = 'Close session';
+  closeBtn.setAttribute('aria-label', `Close session: ${title}`);
   closeBtn.addEventListener('click', (e) => { e.stopPropagation(); terminateSession(sessionId, { rememberClosedTab: true }); });
 
   tab.appendChild(titleSpan);
@@ -2546,6 +2551,7 @@ async function terminateSession(sessionId, { rememberClosedTab = false } = {}) {
   removeTabUi(sessionId);
   tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
   sessionAliveState.delete(sessionId);
+  ensureSessionOrder();
   clearSessionBusy(sessionId);
   cwdChangingSessions.delete(sessionId);
 
