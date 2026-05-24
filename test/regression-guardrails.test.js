@@ -85,6 +85,20 @@ describe('shell:openExternal IPC — regression guardrails', () => {
   });
 });
 
+describe('main process session creation — regression guardrails', () => {
+  it('awaits async PtyManager.newSession before persisting metadata', () => {
+    const offenders = MAIN_SRC
+      .split(/\r?\n/)
+      .filter(line => line.includes('ptyManager.newSession('))
+      .filter(line => !line.includes('await ptyManager.newSession('));
+
+    expect(
+      offenders,
+      `PtyManager.newSession returns a Promise; un-awaited callers persist invalid session IDs:\n${offenders.join('\n')}`
+    ).toEqual([]);
+  });
+});
+
 describe('sidebar history search — regression guardrails', () => {
   it('does not call the deep session-content search API from the renderer sidebar', () => {
     expect(RENDERER_SRC).not.toMatch(/window\.api\.searchSessions\(/);

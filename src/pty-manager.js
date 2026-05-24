@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 
 const os = require('os');
+const { isValidSessionId } = require('./app-support');
 
 // Default to node-pty, but allow injection for testing
 let defaultPty;
@@ -82,7 +83,7 @@ class PtyManager extends EventEmitter {
   async _snapshotSessionFolders() {
     try {
       const entries = await fs.promises.readdir(this._sessionStateDir, { withFileTypes: true });
-      return new Set(entries.filter(e => e.isDirectory()).map(e => e.name));
+      return new Set(entries.filter(e => e.isDirectory()).map(e => e.name).filter(isValidSessionId));
     } catch {
       // Directory might not exist yet; treat as empty snapshot
       return new Set();
@@ -104,7 +105,7 @@ class PtyManager extends EventEmitter {
         continue;
       }
       for (const e of entries) {
-        if (e.isDirectory() && !beforeSnapshot.has(e.name)) {
+        if (e.isDirectory() && isValidSessionId(e.name) && !beforeSnapshot.has(e.name)) {
           return e.name;
         }
       }
