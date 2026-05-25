@@ -620,5 +620,13 @@ describe('PtyManager', () => {
         realFs.rmSync(tmp, { recursive: true, force: true });
       }
     });
+
+    it('default discovery timeout is generous (≥ 30s) so heavy load does not falsely fail new sessions', () => {
+      const realFs = require('fs');
+      const src = realFs.readFileSync(require('path').join(__dirname, '..', 'src', 'pty-manager.js'), 'utf8');
+      const m = src.match(/DEFAULT_DISCOVERY_TIMEOUT_MS\s*=\s*(\d+)/);
+      expect(m, 'DEFAULT_DISCOVERY_TIMEOUT_MS must be declared').not.toBeNull();
+      expect(Number(m[1])).toBeGreaterThanOrEqual(30000);
+    });
   });
 });

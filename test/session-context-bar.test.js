@@ -175,6 +175,73 @@ describe('per-session debounce timer makes Working → Waiting near-instant', ()
     // doesn't immediately demote a session to Waiting.
     expect(body).toMatch(/IDLE_GRACE_POLLS/);
   });
+
+  // ------------------------------------------------------------------
+  // Anti-flicker hysteresis (round 7).
+  //
+  // The user reported that the Working / Waiting badge would briefly
+  // flash (~1s) green→yellow→green→yellow during sessions that were
+  // mostly idle but occasionally produced a single stray status line.
+  // We now (a) hold the Waiting badge for BUSY_HOLD_AFTER_WAITING_MS
+  // after a transition before allowing a re-promotion to Working, and
+  // (b) only schedule a badge DOM patch when the visual state actually
+  // changes (every-chunk patching caused per-frame DOM churn on busy
+  // sessions, contributing to the perceived lag).
+  // ------------------------------------------------------------------
+
+  it('declares BUSY_HOLD_AFTER_WAITING_MS hysteresis constant ≥ 800ms', () => {
+    const m = renderer.match(/BUSY_HOLD_AFTER_WAITING_MS\s*=\s*(\d+)/);
+    expect(m, 'BUSY_HOLD_AFTER_WAITING_MS must be declared').not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThanOrEqual(800);
+  });
+
+  it('BUSY_DEBOUNCE_MS bumped to at least 3000ms so brief streaming pauses do not flap the badge', () => {
+    const m = renderer.match(/BUSY_DEBOUNCE_MS\s*=\s*(\d+)/);
+    expect(m).not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThanOrEqual(3000);
+  });
+
+  it('markSessionBusy consults sessionBusyStateChangedAt and BUSY_HOLD_AFTER_WAITING_MS to suppress same-chunk re-promotion', () => {
+    const m = renderer.match(/function markSessionBusy[\s\S]*?\n\}/);
+    expect(m, 'markSessionBusy body must be findable').not.toBeNull();
+    const body = m[0];
+    expect(body).toMatch(/sessionBusyStateChangedAt\.get\(sessionId\)/);
+    expect(body).toMatch(/BUSY_HOLD_AFTER_WAITING_MS/);
+    // The hysteresis branch must read wasBusy and short-circuit when
+    // a recent Waiting transition is still inside the hold window.
+    expect(body).toMatch(/wasBusy/);
+  });
+
+  it('markSessionBusy stores the transition timestamp into sessionBusyStateChangedAt on every state flip', () => {
+    const m = renderer.match(/function markSessionBusy[\s\S]*?\n\}/);
+    const body = m[0];
+    // Two writes expected: one inside the debounce-timer callback (Working
+    // → Waiting), one when promoting Waiting → Working below the hold gate.
+    const writeMatches = body.match(/sessionBusyStateChangedAt\.set\(sessionId,/g) || [];
+    expect(writeMatches.length, 'two sessionBusyStateChangedAt.set writes (one per transition direction)').toBe(2);
+  });
+
+  it('clearSessionBusy also evicts sessionBusyStateChangedAt so dead sessions do not leak hysteresis state', () => {
+    const m = renderer.match(/function clearSessionBusy[\s\S]*?\n\}/);
+    const body = m[0];
+    expect(body).toMatch(/sessionBusyStateChangedAt\.delete\(sessionId\)/);
+  });
+
+  it('onPtyData listener no longer unconditionally calls schedulePatchSessionStateBadges on every chunk (only on alive transition)', () => {
+    const m = renderer.match(/window\.api\.onPtyData\(\(sessionId, data\) => \{[\s\S]*?\}\)\)/);
+    expect(m, 'onPtyData listener body must be findable').not.toBeNull();
+    const body = m[0];
+    // The unconditional bottom-of-function schedulePatch call is gone; we
+    // now gate the patch on a wasAlive transition guard.
+    expect(body).toMatch(/const wasAlive = sessionAliveState\.has\(sessionId\)/);
+    expect(body).toMatch(/if\s*\(\s*!wasAlive\s*\)\s*schedulePatchSessionStateBadges\(sessionId\)/);
+  });
+
+  it('STATUS_POLL_MS is at least 5000ms to reduce per-tick IPC + DOM cost on the sidebar', () => {
+    const m = renderer.match(/STATUS_POLL_MS\s*=\s*(\d+)/);
+    expect(m).not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThanOrEqual(5000);
+  });
 });
 
 describe('chunkLooksLikeAgentActivity filters ambient pty noise', () => {

@@ -834,15 +834,22 @@ async function init() {
         scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
       });
     }
-    sessionAliveState.add(sessionId);
+    // Track alive transitions so we only repaint the badge when something
+    // visible actually changed. Prior to this guard we scheduled a badge
+    // patch on EVERY pty chunk, queuing rAF DOM work many times per second
+    // per active session — a real source of UI lag during heavy streaming.
+    const wasAlive = sessionAliveState.has(sessionId);
+    if (!wasAlive) sessionAliveState.add(sessionId);
     // Only treat the chunk as "agent thinking" if it carries real printable
     // content. Filters out cursor blinks, spinner-only frames without any
     // status text, and idle redraws that would otherwise flicker the
-    // Working badge once per second.
+    // Working badge once per second. markSessionBusy() is internally
+    // idempotent and only schedules a badge repaint on actual state
+    // transitions (see anti-flicker design comment there).
     if (chunkLooksLikeAgentActivity(data)) {
       markSessionBusy(sessionId);
     }
-    schedulePatchSessionStateBadges(sessionId);
+    if (!wasAlive) schedulePatchSessionStateBadges(sessionId);
   }));
   ipcCleanups.push(window.api.onRestoreTabShortcut(() => {
     void restoreMostRecentClosedTab();
@@ -1539,7 +1546,11 @@ async function getAllValidSessionIds() {
 }
 
 const BUSY_THRESHOLD_MS = 1500;
-const STATUS_POLL_MS = 3000;
+// Background poll that reconciles renderer state with the main process.
+// Bumped from 3000 → 5000 ms to reduce IPC chatter / DOM work; the
+// per-session debounce timer is the primary source of truth so this poll
+// is just a safety-net for renderer-attach-after-spawn cases.
+const STATUS_POLL_MS = 5000;
 // Consecutive idle polls required before transitioning Working → Waiting.
 // The primary "go to Waiting" path is the per-session debounce timer (see
 // markSessionBusy + sessionBusyTimers). This poll-based decay is just a
@@ -1548,10 +1559,18 @@ const STATUS_POLL_MS = 3000;
 // fallback also flips within ~3s instead of the previous ~39s.
 const IDLE_GRACE_POLLS = 1;
 // Time (ms) of pty silence after which a session flips from Working to
-// Waiting. Tuned so brief spinner pauses during streaming don't toggle the
-// badge, while users still see "Waiting" almost immediately when the agent
-// stops responding.
-const BUSY_DEBOUNCE_MS = 2000;
+// Waiting. Bumped from 2000 → 3500 ms so streaming output with brief
+// natural pauses (think time between tokens, file-IO waits, etc.) doesn't
+// flap the badge. The user only sees Waiting after a real lull.
+const BUSY_DEBOUNCE_MS = 3500;
+// Anti-flicker hysteresis: once a session transitions Working → Waiting,
+// we ignore any single new "activity" chunk that arrives within this many
+// ms. The chunk still resets the debounce timer (so we don't *prematurely*
+// re-arm Working), but the visual badge stays Waiting unless sustained
+// activity continues past the hold window. This is what eliminates the
+// "yellow-green-yellow" half-second flash users complained about when a
+// CLI emits one stray status line during silence.
+const BUSY_HOLD_AFTER_WAITING_MS = 1200;
 // Copilot CLI emits ambient pty:data chunks while *idle* — cursor blinks,
 // input-area redraws, hint text refreshes — that are mostly ANSI escape
 // sequences with little or no printable content. If every chunk reset the
@@ -1584,6 +1603,12 @@ function chunkLooksLikeAgentActivity(data) {
   return false;
 }
 
+// Tracks the wall-clock time of the last Working↔Waiting transition per
+// session. markSessionBusy() reads this to enforce
+// BUSY_HOLD_AFTER_WAITING_MS hysteresis so a single stray chunk arriving
+// right after the badge flipped to Waiting can't flash it green again.
+const sessionBusyStateChangedAt = new Map();
+
 // Centralized cleanup so every "session is gone / not busy anymore" code
 // path stays in sync (timer + busy flag + idle counter). The previous
 // scattered `sessionBusyState.delete` / `sessionIdleCount.delete` pairs
@@ -1596,24 +1621,60 @@ function clearSessionBusy(sessionId) {
   }
   sessionBusyState.delete(sessionId);
   sessionIdleCount.delete(sessionId);
+  sessionBusyStateChangedAt.delete(sessionId);
 }
 
 // Mark a session as Working *now* and schedule an automatic flip back to
 // Waiting after BUSY_DEBOUNCE_MS of silence. Called from the pty:data
 // listener — every chunk resets the timer.
+//
+// Anti-flicker design:
+//   1. If the session is already Working, we just bump the silence timer.
+//      No badge work happens — the rAF schedulePatch is skipped because the
+//      visual state hasn't changed.
+//   2. If the session is currently Waiting but flipped to Waiting very
+//      recently (within BUSY_HOLD_AFTER_WAITING_MS), we do NOT promote it
+//      back to Working on a single chunk. We still extend the timer so a
+//      sustained stream eventually wins, but a one-off CLI status line
+//      can't paint the dot green for half a second.
+//   3. Only on a real Waiting → Working transition do we touch the badge.
 function markSessionBusy(sessionId) {
-  sessionBusyState.set(sessionId, true);
-  sessionIdleCount.delete(sessionId);
+  const wasBusy = sessionBusyState.get(sessionId) === true;
+  const now = Date.now();
+
+  // Re-arm the silence timer regardless of whether we flip state below.
   const existing = sessionBusyTimers.get(sessionId);
   if (existing !== undefined) clearTimeout(existing);
   const timer = setTimeout(() => {
     sessionBusyTimers.delete(sessionId);
     if (sessionBusyState.get(sessionId)) {
       sessionBusyState.set(sessionId, false);
+      sessionBusyStateChangedAt.set(sessionId, Date.now());
       schedulePatchSessionStateBadges(sessionId);
     }
   }, BUSY_DEBOUNCE_MS);
   sessionBusyTimers.set(sessionId, timer);
+
+  if (wasBusy) {
+    // Already Working — timer reset above is the only state change. Skip
+    // badge patch (visual state unchanged) so streaming output doesn't
+    // queue per-chunk DOM work.
+    sessionIdleCount.delete(sessionId);
+    return;
+  }
+
+  const lastChange = sessionBusyStateChangedAt.get(sessionId);
+  if (lastChange !== undefined && (now - lastChange) < BUSY_HOLD_AFTER_WAITING_MS) {
+    // Hold-window hysteresis: ignore this lone "activity" chunk for badge
+    // purposes. Timer is reset above so future chunks can still promote us
+    // once the window expires.
+    return;
+  }
+
+  sessionBusyState.set(sessionId, true);
+  sessionBusyStateChangedAt.set(sessionId, now);
+  sessionIdleCount.delete(sessionId);
+  schedulePatchSessionStateBadges(sessionId);
 }
 
 async function updateSessionBusyStates() {
