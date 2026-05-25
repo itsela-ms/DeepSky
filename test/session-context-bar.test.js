@@ -534,6 +534,34 @@ describe('side dot mirrors WORKING/WAITING status (green vs yellow), not just al
     expect(greenRule[0]).toMatch(/box-shadow\s*:[^;]*var\(--green\)/);
   });
 
+  it('collapsed-sidebar dot is enlarged and ringed with a contrast border so green/yellow are clearly distinguishable at small sizes', () => {
+    const m = css.match(/#sidebar\.collapsed \.session-item\.running::after\s*\{[\s\S]*?\n\}/);
+    expect(m, 'collapsed-sidebar dot override must be findable').not.toBeNull();
+    const rule = m[0];
+    // Dot must be at least 10px wide in collapsed mode (was 7px and hard to see).
+    const wMatch = rule.match(/width\s*:\s*(\d+)px/);
+    expect(wMatch, 'collapsed dot must declare a width').not.toBeNull();
+    expect(Number(wMatch[1])).toBeGreaterThanOrEqual(10);
+    // A contrasting border ring separates the dot from the sidebar bg.
+    expect(rule).toMatch(/border\s*:\s*\d+px\s+solid\s+var\(--bg\)/);
+    // Multi-layered box-shadow (inner outline + outer glow) for vivid pop.
+    const shadowMatch = rule.match(/box-shadow\s*:([^;]+);/);
+    expect(shadowMatch, 'collapsed dot must declare a box-shadow').not.toBeNull();
+    const commaCount = (shadowMatch[1].match(/,/g) || []).length;
+    expect(commaCount, 'multi-layer box-shadow (outline + glow)').toBeGreaterThanOrEqual(1);
+  });
+
+  it('collapsed-sidebar WORKING dot has a pulsing animation and reduced-motion fallback', () => {
+    // The .busy override under #sidebar.collapsed should declare an animation.
+    const m = css.match(/#sidebar\.collapsed \.session-item\.running\.busy::after\s*\{[\s\S]*?\n\}/);
+    expect(m, 'collapsed busy dot override must be findable').not.toBeNull();
+    expect(m[0]).toMatch(/animation\s*:\s*session-dot-pulse/);
+    // The named keyframes block exists.
+    expect(css).toMatch(/@keyframes\s+session-dot-pulse\s*\{/);
+    // prefers-reduced-motion overrides the animation back to none.
+    expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?animation\s*:\s*none/);
+  });
+
   it('createSessionItem applies the .busy class on initial render when sessionBusyState is true', () => {
     const m = renderer.match(/function createSessionItem\([\s\S]*?\n\}/);
     expect(m, 'createSessionItem body must be findable').not.toBeNull();
