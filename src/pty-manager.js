@@ -10,7 +10,13 @@ let defaultPty;
 try { defaultPty = require('node-pty'); } catch { defaultPty = null; }
 
 const DEFAULT_SESSION_STATE_DIR = path.join(os.homedir(), '.copilot', 'session-state');
-const DEFAULT_DISCOVERY_TIMEOUT_MS = 10000;
+// The Copilot CLI normally creates its session-state folder within ~1–3s on a
+// healthy machine. Under load (other Electron apps running, slow disk,
+// antivirus scanning the spawn) cold-start can comfortably exceed 10s and
+// users would see "Failed to discover session ID after CLI spawn: Timed out".
+// 30s gives the CLI plenty of room without hanging the UI forever when the
+// spawn truly fails.
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 30000;
 const DEFAULT_DISCOVERY_POLL_INTERVAL_MS = 100;
 
 class PtyManager extends EventEmitter {

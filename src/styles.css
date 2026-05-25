@@ -514,6 +514,11 @@ body {
   color: color-mix(in srgb, var(--red) 120%, white);
 }
 
+/* Side indicator dot — only visible when the sidebar is COLLAPSED (the
+   collapsed view shows just numeric badges, so the dot is the only way to
+   convey live status). In the expanded sidebar the WORKING / WAITING text
+   pill (.session-state) carries the same information; showing the dot
+   *and* the pill is redundant and noisy, so we hide the dot. */
 .session-item.running::after {
   content: '';
   position: absolute;
@@ -521,10 +526,24 @@ body {
   right: 12px;
   width: 7px;
   height: 7px;
-  background: var(--green);
+  background: var(--yellow);
   border-radius: 50%;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--yellow) 40%, transparent);
+  transition: background 140ms ease, box-shadow 140ms ease;
+  display: none;
+}
+
+.session-item.running.busy::after {
+  background: var(--green);
   box-shadow: 0 0 6px color-mix(in srgb, var(--green) 40%, transparent);
 }
+
+/* Collapsed-sidebar dot: only enabled in collapsed mode (the un-hide) AND
+   styled with a vivid look so the user can distinguish WORKING (green +
+   pulse) from WAITING (yellow + solid) at the small collapsed size. Theme
+   pastels (Catppuccin mocha #a6e3a1 / #f9e2af) were too close in luminosity
+   at 7px with a 40%-faded shadow, so we override with full saturation, a
+   contrasting outline ring, and an active pulse for the busy state. */
 
 /* Session delete button (history tab only) */
 .session-delete {
@@ -1025,7 +1044,15 @@ body {
   display: block;
 }
 
-/* Session info bar — always visible below the terminal */
+/* Session info bar — always visible below the terminal.
+   IMPORTANT: this MUST be a fixed height (not min-height). The copy
+   button is 22px tall, the text content is ~16px tall, so the bar's
+   *actual* height jumps between 28px (empty) and ~32px (populated) if
+   we use min-height. fitAddon.fit() measures the terminal container
+   once on session switch — if the bar grows after that measurement,
+   the bottom ~4px of the terminal viewport is hidden behind the bar
+   and the user can't scroll to the very last row. Pinning the bar
+   height to 32px keeps fit() stable. */
 .terminal-prompt-ghost {
   display: flex;
   align-items: center;
@@ -1045,7 +1072,8 @@ body {
     inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent),
     0 -1px 0 color-mix(in srgb, var(--bg-overlay) 30%, transparent);
   flex-shrink: 0;
-  min-height: 28px;
+  height: 32px;
+  box-sizing: border-box;
   overflow: hidden;
 }
 
@@ -1260,8 +1288,7 @@ body {
 }
 
 #sidebar.collapsed .session-item .session-close,
-#sidebar.collapsed .session-item .session-delete,
-#sidebar.collapsed .session-item .session-notification-badge {
+#sidebar.collapsed .session-item .session-delete {
   display: none !important;
 }
 
@@ -1274,9 +1301,20 @@ body {
   color: var(--accent);
 }
 
+/* Collapsed-sidebar dot — un-hide and override colors with more saturated
+   tones so WAITING (yellow) and WORKING (green) are clearly distinguishable.
+   The Catppuccin pastels (--yellow / --green) are too close in luminosity
+   at 7px, so we substitute vivid amber and emerald here only. Geometry,
+   size, ring and any animation are intentionally NOT changed. */
 #sidebar.collapsed .session-item.running::after {
-  top: 7px;
-  right: 7px;
+  display: block;
+  background: #f5b500;
+  box-shadow: 0 0 6px color-mix(in srgb, #f5b500 55%, transparent);
+}
+
+#sidebar.collapsed .session-item.running.busy::after {
+  background: #22c55e;
+  box-shadow: 0 0 6px color-mix(in srgb, #22c55e 55%, transparent);
 }
 
 /* Empty state */
@@ -2324,23 +2362,6 @@ body {
   font-size: 11px;
   color: var(--text-dim);
   margin-top: 1px;
-}
-
-/* Session badge in sidebar */
-.session-notification-badge {
-  background: var(--red, #f38ba8);
-  color: var(--bg-overlay);
-  font-size: 10px;
-  font-weight: 700;
-  min-width: 16px;
-  height: 16px;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 4px;
-  margin-left: auto;
-  flex-shrink: 0;
 }
 
 /* Toast notifications */
