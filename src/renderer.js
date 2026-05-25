@@ -1559,18 +1559,25 @@ const STATUS_POLL_MS = 5000;
 // fallback also flips within ~3s instead of the previous ~39s.
 const IDLE_GRACE_POLLS = 1;
 // Time (ms) of pty silence after which a session flips from Working to
-// Waiting. Bumped from 2000 → 3500 ms so streaming output with brief
-// natural pauses (think time between tokens, file-IO waits, etc.) doesn't
-// flap the badge. The user only sees Waiting after a real lull.
-const BUSY_DEBOUNCE_MS = 3500;
-// Anti-flicker hysteresis: once a session transitions Working → Waiting,
-// we ignore any single new "activity" chunk that arrives within this many
-// ms. The chunk still resets the debounce timer (so we don't *prematurely*
-// re-arm Working), but the visual badge stays Waiting unless sustained
-// activity continues past the hold window. This is what eliminates the
-// "yellow-green-yellow" half-second flash users complained about when a
-// CLI emits one stray status line during silence.
-const BUSY_HOLD_AFTER_WAITING_MS = 1200;
+// Waiting. Bumped 3500 → 6000 so the natural multi-second pauses inside a
+// single agent response (tool calls, file IO, model "thinking" gaps) don't
+// flap the badge mid-response. The user only sees Waiting after a real
+// 6-second lull, which empirically corresponds to "the agent is done".
+const BUSY_DEBOUNCE_MS = 6000;
+// Anti-flicker hysteresis: minimum dwell time in the Waiting state. After
+// any Working → Waiting transition, the badge stays Waiting for at least
+// this many ms — any single new "activity" chunk inside the window resets
+// the debounce timer but does NOT promote back to Working. Sustained
+// activity past the window still wins. Bumped 1200 → 2500 because shorter
+// holds still let bursts flash green for a frame.
+const BUSY_HOLD_AFTER_WAITING_MS = 2500;
+// Mirror of the above for the opposite direction: after a Waiting →
+// Working transition, the badge stays Working for at least this many ms
+// before the debounce timer is allowed to flip it back to Waiting. Without
+// this, a single isolated activity chunk would paint the dot green and the
+// debounce-fired Waiting could land within ~6s, producing a visible
+// green-yellow flicker on what should have been a stable Waiting badge.
+const BUSY_HOLD_AFTER_WORKING_MS = 2000;
 // Copilot CLI emits ambient pty:data chunks while *idle* — cursor blinks,
 // input-area redraws, hint text refreshes — that are mostly ANSI escape
 // sequences with little or no printable content. If every chunk reset the
@@ -1583,6 +1590,28 @@ const BUSY_HOLD_AFTER_WAITING_MS = 1200;
 const BUSY_MIN_PRINTABLE_CHARS = 6;
 const ANSI_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])/g;
 const sessionIdleCount = new Map();
+
+// Window (ms) after a `resizePty` call during which incoming pty:data
+// chunks are NOT allowed to promote a session to Working. The CLI process
+// receives SIGWINCH-equivalent and redraws its prompt/status line in
+// response to the resize, producing chunks that look identical to live
+// agent output. This is the #1 cause of "switching to a session paints
+// the badge WORKING even though the agent is idle" flicker the user
+// reported. Sustained activity past this window still wins normally.
+const BUSY_RESIZE_SUPPRESS_MS = 1500;
+// Wall-clock timestamp (ms) of the last `resizePty` call per session.
+// markSessionBusy() consults this to skip the Waiting → Working promotion
+// path while the CLI is mid-redraw from a resize event.
+const sessionResizeAt = new Map();
+
+// Forwards a resize to main and stamps the session's resize-suppression
+// window. Must be used in place of the underlying IPC resize api from every
+// renderer call site so the busy-state machine knows to ignore the
+// downstream prompt-redraw chunks.
+function trackedResizePty(sessionId, cols, rows) {
+  if (sessionId) sessionResizeAt.set(sessionId, Date.now());
+  try { window.api.resizePty(sessionId, cols, rows); } catch (_) { /* noop */ }
+}
 
 function chunkLooksLikeAgentActivity(data) {
   let text = data;
@@ -1622,6 +1651,7 @@ function clearSessionBusy(sessionId) {
   sessionBusyState.delete(sessionId);
   sessionIdleCount.delete(sessionId);
   sessionBusyStateChangedAt.delete(sessionId);
+  sessionResizeAt.delete(sessionId);
 }
 
 // Mark a session as Working *now* and schedule an automatic flip back to
@@ -1638,6 +1668,11 @@ function clearSessionBusy(sessionId) {
 //      sustained stream eventually wins, but a one-off CLI status line
 //      can't paint the dot green for half a second.
 //   3. Only on a real Waiting → Working transition do we touch the badge.
+//   4. Resize-suppression: if the session was resized within the last
+//      BUSY_RESIZE_SUPPRESS_MS, refuse promotion entirely — those chunks
+//      are the CLI redrawing its prompt in response to SIGWINCH, NOT real
+//      agent activity. Switching to a session must not paint WORKING just
+//      because the terminal got resized.
 function markSessionBusy(sessionId) {
   const wasBusy = sessionBusyState.get(sessionId) === true;
   const now = Date.now();
@@ -1647,11 +1682,31 @@ function markSessionBusy(sessionId) {
   if (existing !== undefined) clearTimeout(existing);
   const timer = setTimeout(() => {
     sessionBusyTimers.delete(sessionId);
-    if (sessionBusyState.get(sessionId)) {
-      sessionBusyState.set(sessionId, false);
-      sessionBusyStateChangedAt.set(sessionId, Date.now());
-      schedulePatchSessionStateBadges(sessionId);
+    if (!sessionBusyState.get(sessionId)) return;
+    // Minimum-Working-dwell hysteresis: don't flip back to Waiting if we
+    // just transitioned to Working within BUSY_HOLD_AFTER_WORKING_MS ago.
+    // Without this, a single isolated activity chunk during a long quiet
+    // period could promote → debounce-fire → flicker green-yellow.
+    const lastTransition = sessionBusyStateChangedAt.get(sessionId);
+    const tNow = Date.now();
+    if (lastTransition !== undefined && (tNow - lastTransition) < BUSY_HOLD_AFTER_WORKING_MS) {
+      // Re-arm for the remaining hold time so we still flip once the
+      // dwell window has expired (assuming no new activity in the meantime).
+      const remaining = BUSY_HOLD_AFTER_WORKING_MS - (tNow - lastTransition);
+      const reTimer = setTimeout(() => {
+        sessionBusyTimers.delete(sessionId);
+        if (sessionBusyState.get(sessionId)) {
+          sessionBusyState.set(sessionId, false);
+          sessionBusyStateChangedAt.set(sessionId, Date.now());
+          schedulePatchSessionStateBadges(sessionId);
+        }
+      }, remaining);
+      sessionBusyTimers.set(sessionId, reTimer);
+      return;
     }
+    sessionBusyState.set(sessionId, false);
+    sessionBusyStateChangedAt.set(sessionId, tNow);
+    schedulePatchSessionStateBadges(sessionId);
   }, BUSY_DEBOUNCE_MS);
   sessionBusyTimers.set(sessionId, timer);
 
@@ -1660,6 +1715,13 @@ function markSessionBusy(sessionId) {
     // badge patch (visual state unchanged) so streaming output doesn't
     // queue per-chunk DOM work.
     sessionIdleCount.delete(sessionId);
+    return;
+  }
+
+  // Resize-suppression: chunks arriving in the wake of a SIGWINCH-equiv
+  // are CLI prompt redraws, NOT live agent activity. Don't promote.
+  const lastResize = sessionResizeAt.get(sessionId);
+  if (lastResize !== undefined && (now - lastResize) < BUSY_RESIZE_SUPPRESS_MS) {
     return;
   }
 
@@ -1702,7 +1764,17 @@ async function updateSessionBusyStates() {
           const count = (sessionIdleCount.get(s.id) || 0) + 1;
           sessionIdleCount.set(s.id, count);
           if (count >= IDLE_GRACE_POLLS) {
+            // Respect Working-dwell hysteresis even on poll-driven decay so
+            // a short Working flash from a stale poll cycle can't immediately
+            // flip back. Stamp the transition timestamp so the next
+            // markSessionBusy() applies BUSY_HOLD_AFTER_WAITING_MS correctly.
+            const lastChange = sessionBusyStateChangedAt.get(s.id);
+            if (lastChange !== undefined && (now - lastChange) < BUSY_HOLD_AFTER_WORKING_MS) {
+              // Skip this decay tick; try again next poll.
+              continue;
+            }
             sessionBusyState.set(s.id, false);
+            sessionBusyStateChangedAt.set(s.id, now);
             sessionIdleCount.delete(s.id);
           }
         }
@@ -1710,8 +1782,13 @@ async function updateSessionBusyStates() {
         // Bootstrap: renderer attached after the session was already
         // producing output, so the debounce timer never fired for it.
         sessionBusyState.set(s.id, true);
+        sessionBusyStateChangedAt.set(s.id, now);
       } else if (!wasKnown) {
         sessionBusyState.set(s.id, false);
+        // No timestamp stamp here — this is the initial "nothing happened
+        // yet" state, not a real transition. Leaving lastChange undefined
+        // means the next markSessionBusy() will promote immediately, which
+        // is the correct behaviour for a freshly-attached idle session.
       }
     }
     // Sync alive state from main process
@@ -2479,7 +2556,7 @@ function createTerminal(sessionId) {
     window.api.writePty(sessionId, data);
   });
   terminal.onResize(({ cols, rows }) => {
-    window.api.resizePty(sessionId, cols, rows);
+    trackedResizePty(sessionId, cols, rows);
     scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
   });
   terminal.onScroll(() => {
@@ -2544,7 +2621,7 @@ function switchToSession(sessionId) {
       if (activeSessionId !== currentId) return;
       entry.fitAddon.fit();
       entry.terminal.focus();
-      window.api.resizePty(currentId, entry.terminal.cols, entry.terminal.rows);
+      trackedResizePty(currentId, entry.terminal.cols, entry.terminal.rows);
       // Single viewport sync — previously we ran syncTerminalViewport()
       // synchronously here AND scheduled another one 20ms later, which caused
       // a visible double-paint flicker on session switch. The scheduled one
@@ -3381,7 +3458,7 @@ function fitActiveTerminal() {
   if (activeSessionId && terminals.has(activeSessionId)) {
     const entry = terminals.get(activeSessionId);
     entry.fitAddon.fit();
-    window.api.resizePty(activeSessionId, entry.terminal.cols, entry.terminal.rows);
+    trackedResizePty(activeSessionId, entry.terminal.cols, entry.terminal.rows);
     // Force viewport scroll area sync even when fit() is a no-op (same cols/rows).
     syncTerminalViewport(activeSessionId);
     // Reset any horizontal scroll offset that xterm's viewport may have retained

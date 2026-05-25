@@ -189,16 +189,48 @@ describe('per-session debounce timer makes Working → Waiting near-instant', ()
   // sessions, contributing to the perceived lag).
   // ------------------------------------------------------------------
 
-  it('declares BUSY_HOLD_AFTER_WAITING_MS hysteresis constant ≥ 800ms', () => {
+  it('declares BUSY_HOLD_AFTER_WAITING_MS hysteresis constant ≥ 2000ms', () => {
     const m = renderer.match(/BUSY_HOLD_AFTER_WAITING_MS\s*=\s*(\d+)/);
     expect(m, 'BUSY_HOLD_AFTER_WAITING_MS must be declared').not.toBeNull();
-    expect(Number(m[1])).toBeGreaterThanOrEqual(800);
+    expect(Number(m[1])).toBeGreaterThanOrEqual(2000);
   });
 
-  it('BUSY_DEBOUNCE_MS bumped to at least 3000ms so brief streaming pauses do not flap the badge', () => {
+  it('declares BUSY_HOLD_AFTER_WORKING_MS dwell constant ≥ 1500ms to prevent immediate flip-back-to-Waiting flicker', () => {
+    const m = renderer.match(/BUSY_HOLD_AFTER_WORKING_MS\s*=\s*(\d+)/);
+    expect(m, 'BUSY_HOLD_AFTER_WORKING_MS must be declared').not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThanOrEqual(1500);
+  });
+
+  it('declares BUSY_RESIZE_SUPPRESS_MS so resize-induced CLI prompt redraws cannot promote a session to Working', () => {
+    const m = renderer.match(/BUSY_RESIZE_SUPPRESS_MS\s*=\s*(\d+)/);
+    expect(m, 'BUSY_RESIZE_SUPPRESS_MS must be declared').not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThanOrEqual(1000);
+  });
+
+  it('exports trackedResizePty wrapper that stamps sessionResizeAt before forwarding to the IPC api', () => {
+    const m = renderer.match(/function trackedResizePty\(sessionId, cols, rows\)[\s\S]*?\n\}/);
+    expect(m, 'trackedResizePty must be declared').not.toBeNull();
+    const body = m[0];
+    expect(body).toMatch(/sessionResizeAt\.set\(sessionId,\s*Date\.now\(\)\)/);
+    expect(body).toMatch(/window\.api\.resizePty\(sessionId, cols, rows\)/);
+  });
+
+  it('every call site of api.resizePty goes through trackedResizePty so resize-suppression is global', () => {
+    // After the refactor, the only literal `window.api.resizePty(...)` call
+    // in renderer.js should be the one *inside* trackedResizePty itself.
+    // All other call sites must invoke trackedResizePty(...) instead.
+    const matches = renderer.match(/window\.api\.resizePty\(/g) || [];
+    expect(matches.length, 'exactly one literal api.resizePty call (inside trackedResizePty)').toBe(1);
+    // And we should see at least 2 trackedResizePty call sites elsewhere
+    // (xterm.onResize handler + switchToSession + sidebar-resize handler).
+    const tracked = renderer.match(/trackedResizePty\(/g) || [];
+    expect(tracked.length, 'multiple call sites for trackedResizePty').toBeGreaterThanOrEqual(3);
+  });
+
+  it('BUSY_DEBOUNCE_MS bumped to at least 5000ms so natural pauses inside a single response do not flap the badge', () => {
     const m = renderer.match(/BUSY_DEBOUNCE_MS\s*=\s*(\d+)/);
     expect(m).not.toBeNull();
-    expect(Number(m[1])).toBeGreaterThanOrEqual(3000);
+    expect(Number(m[1])).toBeGreaterThanOrEqual(5000);
   });
 
   it('markSessionBusy consults sessionBusyStateChangedAt and BUSY_HOLD_AFTER_WAITING_MS to suppress same-chunk re-promotion', () => {
@@ -212,19 +244,46 @@ describe('per-session debounce timer makes Working → Waiting near-instant', ()
     expect(body).toMatch(/wasBusy/);
   });
 
-  it('markSessionBusy stores the transition timestamp into sessionBusyStateChangedAt on every state flip', () => {
+  it('markSessionBusy honors resize-suppression: chunks within BUSY_RESIZE_SUPPRESS_MS of a resize never promote to Working', () => {
     const m = renderer.match(/function markSessionBusy[\s\S]*?\n\}/);
     const body = m[0];
-    // Two writes expected: one inside the debounce-timer callback (Working
-    // → Waiting), one when promoting Waiting → Working below the hold gate.
-    const writeMatches = body.match(/sessionBusyStateChangedAt\.set\(sessionId,/g) || [];
-    expect(writeMatches.length, 'two sessionBusyStateChangedAt.set writes (one per transition direction)').toBe(2);
+    expect(body).toMatch(/sessionResizeAt\.get\(sessionId\)/);
+    expect(body).toMatch(/BUSY_RESIZE_SUPPRESS_MS/);
   });
 
-  it('clearSessionBusy also evicts sessionBusyStateChangedAt so dead sessions do not leak hysteresis state', () => {
+  it('markSessionBusy debounce-timer callback respects BUSY_HOLD_AFTER_WORKING_MS dwell so Working never flashes for under the dwell time', () => {
+    const m = renderer.match(/function markSessionBusy[\s\S]*?\n\}/);
+    const body = m[0];
+    // The setTimeout(BUSY_DEBOUNCE_MS) callback must check the dwell
+    // constant before flipping busy=false.
+    expect(body).toMatch(/BUSY_HOLD_AFTER_WORKING_MS/);
+  });
+
+  it('markSessionBusy stores the transition timestamp into sessionBusyStateChangedAt on every state flip path', () => {
+    const m = renderer.match(/function markSessionBusy[\s\S]*?\n\}/);
+    const body = m[0];
+    // Three writes expected after the round-8 changes:
+    //   1. Inside the dwell-deferred re-arm timer (delayed Working → Waiting)
+    //   2. Inside the original debounce-timer callback (Working → Waiting)
+    //   3. Below the hold gate when promoting Waiting → Working
+    const writeMatches = body.match(/sessionBusyStateChangedAt\.set\(sessionId,/g) || [];
+    expect(writeMatches.length, 'three sessionBusyStateChangedAt.set writes (one per transition path)').toBe(3);
+  });
+
+  it('clearSessionBusy also evicts sessionBusyStateChangedAt AND sessionResizeAt so dead sessions do not leak hysteresis state', () => {
     const m = renderer.match(/function clearSessionBusy[\s\S]*?\n\}/);
     const body = m[0];
     expect(body).toMatch(/sessionBusyStateChangedAt\.delete\(sessionId\)/);
+    expect(body).toMatch(/sessionResizeAt\.delete\(sessionId\)/);
+  });
+
+  it('updateSessionBusyStates poll respects BUSY_HOLD_AFTER_WORKING_MS on idle-decay to prevent flicker from racing the debounce timer', () => {
+    const m = renderer.match(/async function updateSessionBusyStates[\s\S]*?\n\}/);
+    expect(m, 'updateSessionBusyStates body must be findable').not.toBeNull();
+    const body = m[0];
+    expect(body).toMatch(/BUSY_HOLD_AFTER_WORKING_MS/);
+    // And the bootstrap path must stamp the transition timestamp.
+    expect(body).toMatch(/sessionBusyStateChangedAt\.set\(s\.id,/);
   });
 
   it('onPtyData listener no longer unconditionally calls schedulePatchSessionStateBadges on every chunk (only on alive transition)', () => {
