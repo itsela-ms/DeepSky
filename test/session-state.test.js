@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-const { deriveSessionState } = require('../src/session-state');
+const { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar } = require('../src/session-state');
 
 describe('deriveSessionState', () => {
   it('returns Idle when nothing is active', () => {
@@ -56,5 +56,88 @@ describe('deriveSessionState', () => {
   it('isBusy false with running session yields Waiting, not Working', () => {
     const result = deriveSessionState({ isRunning: true, isActive: true, hasPR: false, isHistory: false, isBusy: false });
     expect(result.cls).toBe('state-waiting');
+  });
+});
+
+describe('filterSessionsForSidebar', () => {
+  const sessions = [
+    { id: 'active-1', title: 'Active 1' },
+    { id: 'done-1', title: 'Done 1' },
+    { id: 'active-2', title: 'Active 2' }
+  ];
+
+  it('returns only active sessions on the active tab', () => {
+    const result = filterSessionsForSidebar({
+      sessions,
+      activeSessionIds: new Set(['active-1', 'active-2']),
+      currentSidebarTab: 'active'
+    });
+
+    expect(result.map(session => session.id)).toEqual(['active-1', 'active-2']);
+  });
+
+  it('hides active sessions from the history tab', () => {
+    const result = filterSessionsForSidebar({
+      sessions,
+      activeSessionIds: new Set(['active-1', 'active-2']),
+      currentSidebarTab: 'history'
+    });
+
+    expect(result.map(session => session.id)).toEqual(['done-1']);
+  });
+
+  it('returns a copy of all sessions for other tabs', () => {
+    const result = filterSessionsForSidebar({
+      sessions,
+      activeSessionIds: new Set(['active-1']),
+      currentSidebarTab: 'unknown'
+    });
+
+    expect(result).toEqual(sessions);
+    expect(result).not.toBe(sessions);
+  });
+});
+
+describe('getNewSessionAvailability', () => {
+  it('blocks new sessions when Copilot CLI is unavailable', () => {
+    const result = getNewSessionAvailability({
+      useAgencyCopilot: false,
+      copilotAvailable: false,
+      agencyAvailable: false,
+    });
+
+    expect(result).toEqual({
+      launcher: 'copilot',
+      available: false,
+      reason: 'New sessions are unavailable because GitHub Copilot CLI is not installed.',
+    });
+  });
+
+  it('allows agency launches without Copilot CLI when agency is available', () => {
+    const result = getNewSessionAvailability({
+      useAgencyCopilot: true,
+      copilotAvailable: false,
+      agencyAvailable: true,
+    });
+
+    expect(result).toEqual({
+      launcher: 'agency',
+      available: true,
+      reason: '',
+    });
+  });
+
+  it('falls back to a combined missing-tools message when agency is requested but both launchers are missing', () => {
+    const result = getNewSessionAvailability({
+      useAgencyCopilot: true,
+      copilotAvailable: false,
+      agencyAvailable: false,
+    });
+
+    expect(result).toEqual({
+      launcher: 'copilot',
+      available: false,
+      reason: 'New sessions are unavailable because neither GitHub Copilot CLI nor Agency is installed.',
+    });
   });
 });

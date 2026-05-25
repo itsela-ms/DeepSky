@@ -2,6 +2,141 @@
 
 All notable changes to DeepSky are documented here.
 
+## [Unreleased]
+
+### Added
+- **macOS (Apple Silicon) support** — first-class build target. `npm run dist:mac` produces signed-free `dmg` + `zip` arm64 artifacts; CI workflow builds and publishes them alongside the existing Windows installer.
+- **Diagnostic file logging** — DeepSky now writes rotating daily log files under `~/Library/Application Support/DeepSky/logs/main-YYYY-MM-DD.log` (macOS) / `%APPDATA%/DeepSky/logs/` (Windows) / `~/.config/DeepSky/logs/` (Linux) via `electron-log`. Captures session-service file I/O, PTY spawn arguments, IPC handler entry/exit/error, and uncaught renderer/main errors. Renderer `console.*` and uncaught window errors are mirrored into the main log file.
+- **Settings → About → Reveal logs folder** — surfaces the current log file in Finder/Explorer for support handoffs.
+
+### Fixed
+- **`agency`-launched sessions no longer exit with code 1 immediately on macOS/Linux** — DeepSky now resolves the `agency` binary's absolute path at startup (via `resolveAgencyInfo`, which checks `~/.config/agency/CurrentVersion/agency` and common bin dirs) and passes it to node-pty instead of relying on the spawn-time `PATH` lookup. The GUI-launched `PATH` doesn't include `~/.config/agency/CurrentVersion/`, so previously `file=agency` failed to resolve and the PTY died silently. Startup log now reports `agency binary resolved to: <path> (found=<bool>)` alongside the existing copilot resolution line.
+- **Agency detection on macOS** — `resolveAgencyInfo` now probes Apple Silicon Homebrew paths (`/opt/homebrew/bin`) and user-local installs.
+- **Early-exit PTY diagnostics** — when a spawned terminal exits within 3 seconds, its first ~16 KB of output (ANSI-stripped, length-clamped) is included in the exit log line so failures like `agency: unknown flag --resume` or `copilot: session not found` are visible without attaching a debugger. Log level escalates to `warn` for early exits and includes `aliveMs`, `launcher`, and `cwd`.
+- **Quieter session listing logs** — Copilot CLI's own session directories under `~/.copilot/session-state/` (which never contain DeepSky's `workspace.yaml` metadata) no longer trigger a `warn` per session per poll cycle. They're aggregated into a single throttled summary line: `listSessions: loaded=N non_deepsky=M errors=K raw=T`, re-emitted only when the bucket counts change. Genuine corruption (any error other than `ENOENT workspace.yaml`) still warns immediately.
+
+### Changed
+- **`pty-manager` refactor** — consolidated `NOOP_LOG`, extracted shared session-handler wiring, removed duplicated spawn/exit plumbing across `openSession` / `newSession` / `claimStandby` / `warmUp`. Behavior unchanged; line count reduced by roughly a third with new tests covering the consolidated paths.
+
+## [1.2.1] - 2026-05-19
+
+### Fixed
+- **Compatibility with Copilot CLI 1.0.49+** — new sessions and warm-up standbys no longer pass `--resume <unknown-uuid>` to the CLI. The CLI changed in 1.0.49 to strictly reject unknown IDs (`Error: No session, task, or name matched '<uuid>'`), which caused every newly opened tab to die immediately. DeepSky now spawns new sessions without `--resume` and discovers the CLI-assigned session ID by diffing the `~/.copilot/session-state` directory. Existing sessions (resume from sidebar) are unchanged.
+
+## [1.2.0] - 2026-05-18
+
+### Added
+- **Readable About release notes** — the About tab now renders recent changelog entries as structured release cards and highlights the current build.
+- **Brochure access from About** — the About tab includes an availability-aware **Open brochure** action so local release collateral is one click away.
+- **Explicit full-history loading** — the History tab now has a **Show all history** button for intentionally loading older saved sessions beyond the default recent window.
+- **Startup loading screen** — DeepSky now shows phase-specific startup progress while settings, sessions, notifications, and workspace state load; startup failures stay visible instead of dropping into a half-loaded UI.
+
+### Changed
+- **Tighter status summary layout** — the Session ID now stays on a single truncated line, and the `session` / `files` quick actions stay compact on one row.
+- **Split tab state from live-session state** — DeepSky now persists open tabs separately from active sessions so the tab strip, Active list, and startup restore no longer fight each other.
+- **History now defaults to a bounded recent view** — the History tab only loads up to 500 sessions from the last 3 months so the default sidebar stays responsive.
+- **Sidebar search is metadata-only by default** — title, folder, tags, and resources remain searchable without doing deep transcript scans unless you explicitly ask for it.
+
+### Fixed
+- **Non-Latin shortcut support** — keyboard shortcuts now work correctly on non-Latin keyboard layouts.
+- **Single-open terminal links** — terminal hyperlinks keep the pointer hover affordance without opening twice on click.
+- **Unavailable summary actions** — `session` / `files` quick actions are disabled and greyed out when those directories are unavailable.
+- **Tab close no longer stops live sessions** — closing a tab now only removes the tab UI and leaves the active session running.
+- **Tab close keeps active-list grouping** — closing a tab no longer drops that session out of its active-list group.
+- **Stable group rename focus** — double-click rename on a group header no longer loses focus during background sidebar refreshes.
+- **Correct Active-list startup restore** — reopening DeepSky restores the Active list from previously active sessions instead of rebuilding it from open tabs.
+- **Closed-tab restore works with scoped History again** — `Ctrl+Shift+T` now restores from the full session inventory instead of only the currently loaded sidebar subset.
+- **Closed-tab restore covers Active-list close paths** — `Ctrl+Shift+T` now restores sessions closed from the Active list, including fresh in-memory sessions before sidebar metadata catches up.
+
+## [1.1.0] - 2026-05-04
+
+### Added
+- **Enhance Instructions skill** — new "✨ Enhance" button in the Custom Instructions panel. Creates a timestamped backup of `~/.copilot/copilot-instructions.md` and `~/.copilot/playbooks/` to `~/.copilot/instruction-backups/<timestamp>/` **before** anything else, then spawns a new Copilot session with a predefined prompt that researches the latest context-engineering / Skills practices and rewrites your instructions. When the agent finishes it produces a `changes.html` report; a "Review" button surfaces the diff in a sandboxed iframe modal with **Keep changes** or **↩ Rollback** actions. Rollback fully restores the snapshot (including removing playbooks added after the backup).
+- **Files Folder quick-action** in the Session Status summary — jump straight to the session's `files/` directory alongside the existing Session Folder action.
+
+### Changed
+- **Generalized session-path resolution** — `session-paths.js` now exposes `resolveSessionPath` and `resolveSessionFilesDirectory` so the new Files Folder action and any future per-session subdirectory openers share the same symlink/path-traversal validation.
+- **Status summary rendering extracted** to `src/status-summary.js` for testability.
+- **Tighter status summary layout** — the Copy ID action now lives as a compact icon inside the Session ID chip, keeping the Session Folder / Files Folder quick actions on a single row.
+
+## [1.0.1-beta.1] - 2026-04-27
+
+### Added
+- **Open session directory action** — the Session Status summary now includes an **Open Folder** button so you can jump straight to the current session's directory from the status panel
+
+### Changed
+- **Shared session path validation** — session-directory opening and generated-file opening now use the same main-process path validation helpers instead of separate ad-hoc checks
+
+## [1.0.0] - 2026-04-26
+
+### Added
+- **Colorized file diff previews** — hover a changed file in the Status panel to keep a real diff popover open, with red/green line styling instead of a plain tooltip
+
+### Changed
+- **Unified session metadata storage** — DeepSky now writes rename and working-directory updates into `workspace.yaml`, so the sidebar, tabs, and status panel read the same source of truth
+- **Live session refresh** — open sessions refresh their metadata during status polling, which keeps renamed sessions and directory changes in sync without reopening the app
+- **Generated file safety** — DeepSky now ignores symlinked generated-file entries and only opens files whose real path stays inside the session `files` directory
+
+### Fixed
+- `/rename` now updates the tab strip and sidebar title consistently after Copilot renames a session
+- Sidebar hide/show persistence now keeps collapsed-state settings aligned when restoring the UI
+- Session metadata writes are serialized per session so rename and working-directory updates do not overwrite each other
+
+## [0.9.1-beta.1] - 2026-04-16
+
+### Added
+- **Agency launcher toggle** — choose `agency copilot` for new sessions from General settings when you want to start DeepSky sessions through Agency instead of the default Copilot CLI command
+
+### Changed
+- **Per-session launcher persistence** — DeepSky now remembers whether a session was started with Copilot CLI or `agency copilot`, so reopen and working-directory changes keep using the same launcher
+- **Standby session matching** — prewarmed sessions now track their launcher choice so DeepSky only reuses standby sessions when both the working directory and launcher match
+
+## [0.9.0] - 2026-03-29
+
+### Added
+- **Settings redesigned with tabs** — General, Updates, Shortcuts, About; settings are now logically grouped instead of one long scroll
+- **Auto-update toggle** — enable or disable automatic update checking and installation from the Updates tab
+- **Beta channel opt-in** — "Early adopter" toggle to receive beta releases before general availability
+- **Browse/Clear buttons for default directory** — pick a working directory with a file browser instead of typing the path; clear it with one click
+- **Expandable tag overflow** — clicking the "+N" badge on a session card expands all hidden tags (was hover-only)
+- **Beta prerelease detection in CI** — builds from a `-beta` branch are automatically marked as prerelease on GitHub
+
+### Changed
+- **Settings modal width** increased from 420 to 480px with fixed-header/scrollable-body layout
+- **Modern toggle switches** — iOS/macOS-style toggles replace old checkbox-based controls throughout Settings
+- **Keyboard shortcuts moved** to a dedicated Shortcuts tab
+- **Theme selection moved** under General → Appearance
+- **Update service is now settings-driven** — auto-download, auto-install, and prerelease behavior reflect user preferences
+
+### Fixed
+- Settings modal header no longer disappears when scrolling through long settings
+- Tag expansion now uses explicit state instead of hover, preventing layout shifts
+
+## [0.8.9] - 2026-03-23
+
+### Fixed
+- **Critical regression** — v0.8.6–0.8.8 introduced a bug that prevented active sessions from showing in the sidebar on startup; this release reverts to the last stable base (v0.8.5) and republishes as v0.8.9 so auto-update delivers the fix
+
+## [0.8.5] - 2026-03-16
+
+### Added
+- **Sidebar collapse** — click the sidebar border to fully collapse (width 0) with an expand strip; drag to icon-mode at smaller widths
+- **Info bar** — structural bar below the terminal showing the session title and last prompt
+- **Restore closed tab** — `Ctrl+Shift+T` reopens the last closed session tab
+- **In-session search** — `Ctrl+F` opens buffer-only search with viewport sync and wrapped-line-aware matching
+- **Sidebar content search** — search across all session content from the sidebar search bar
+- **Session ID in status panel** — shows session ID with a copy button in the summary section
+- **Keyboard shortcuts in Settings** — new section showing all shortcuts with styled keycaps
+- **Rename from context menu** — right-click a session in the sidebar to rename it
+
+### Changed
+- **Themed scrollbar** — always-visible webkit scrollbar with Catppuccin styling
+- **Next steps truncation** — long plan step labels are summarized to 6 words for cleaner status panel display
+- **Zoom scroll fix** — terminal scrolls to bottom after zoom refit to prevent getting stuck
+
+### Removed
+- **"Check for Updates" button** — auto-update runs silently on startup and every 15 minutes; manual check no longer needed
+
 ## [0.8.4] - 2026-03-12
 
 ### Fixed
@@ -42,7 +177,7 @@ All notable changes to DeepSky are documented here.
 - **Keyboard shortcut** — `Ctrl+I` toggles the status panel; works even when terminal is focused
 
 ### Changed
-- **Repository migration** — DeepSky moved from `itsela-ms/DeepSky` to `itsela_microsoft/DeepSky` to enable community contributions. Auto-updater now points to the new repository — future updates arrive from the new location automatically.
+- **Repository publishing** — DeepSky updates continue to publish from the public `itsela-ms/DeepSky` repository so releases, feedback links, and auto-update all stay aligned.
 - **Update badge** — now shows immediately when a download starts (not just after completion); toast notification only fires after download completes
 - Resources (PRs, work items, pipelines, repos, links) are now displayed as sections inside the Status panel instead of the old dedicated Resource panel
 

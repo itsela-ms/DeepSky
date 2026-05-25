@@ -1,6 +1,6 @@
 {
   "name": "deepsky",
-  "version": "0.8.4",
+  "version": "1.2.1",
   "description": "Your command center for GitHub Copilot CLI — manage, search, and switch between sessions from a sleek desktop app.",
   "main": "src/main.js",
   "author": "itsela-ms",
@@ -11,7 +11,7 @@
     "launch": "npm run build && wscript launch.vbs",
     "test": "vitest run",
     "dist": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac --arm64"
   },
   "build": {
     "appId": "com.itsela.deepsky",
@@ -20,29 +20,27 @@
     "directories": {
       "output": "release"
     },
+    "afterPack": "scripts/after-pack.js",
     "files": [
+      "CHANGELOG.md",
       "src/**/*",
       "dist/**/*",
       "node_modules/**/*",
       "!node_modules/.cache"
     ],
-    "asarUnpack": [
-      "node_modules/node-pty/**"
-    ],
-    "mac": {
-      "target": "dmg",
-      "icon": "deepsky.png",
-      "category": "public.app-category.developer-tools",
-      "artifactName": "${productName}-${version}-mac.${ext}",
-      "identity": null
-    },
-    "dmg": {
-      "title": "${productName} ${version}",
-      "artifactName": "${productName}-${version}.${ext}"
-    },
     "win": {
       "target": "nsis",
       "icon": "deepsky.ico"
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": "arm64" },
+        { "target": "zip", "arch": "arm64" }
+      ],
+      "icon": "deepsky.png",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": true,
@@ -61,6 +59,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "electron-log": "^5.4.4",
     "electron-updater": "^6.7.3",
     "js-yaml": "^4.1.0",
     "node-pty": "^1.1.0"

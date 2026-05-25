@@ -4,16 +4,23 @@ const path = require('path');
 const DEFAULTS = {
   maxConcurrent: 5,
   sidebarWidth: 280,
+  sidebarCollapsed: false,
+  sidebarHidden: false,
   lastActiveTab: 'active', // 'active' or 'history'
   theme: 'mocha', // 'mocha' or 'latte'
   copilotPath: '', // auto-detect if empty; override with full path to copilot binary
   openTabs: [], // session IDs of tabs to restore on startup
+  activeSessions: [], // session IDs that should be resumed as active on startup
   activeTab: null, // session ID of the last active tab
   tabGroups: [], // Array of { id, name, color, collapsed, tabIds }
   sessionOrder: [], // Manual ordering of active session IDs in sidebar
+  statusPanelSections: null, // persisted expand/collapse state for status panel sections
   zoomFactor: 1.0, // 0.75 – 1.5
   promptForWorkdir: false, // show directory picker when creating a new session
   defaultWorkdir: '', // default working directory for new sessions; empty = user home
+  useAgencyCopilot: false, // launch new sessions via `agency copilot` instead of the default copilot command
+  autoUpdateEnabled: true, // false = no update checks or downloads
+  updateChannel: 'stable', // 'stable' | 'beta'
 };
 
 class SettingsService {

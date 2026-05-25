@@ -1,18 +1,28 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  // Platform
+  platform: process.platform,
+
   // Sessions
-  listSessions: () => ipcRenderer.invoke('sessions:list'),
+  listSessions: (options) => ipcRenderer.invoke('sessions:list', options),
+  searchSessions: (query) => ipcRenderer.invoke('sessions:search', query),
+  getLastUserPrompt: (sessionId) => ipcRenderer.invoke('session:getLastUserPrompt', sessionId),
   renameSession: (sessionId, title) => ipcRenderer.invoke('session:rename', sessionId, title),
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   addResource: (sessionId, url) => ipcRenderer.invoke('resource:add', sessionId, url),
   removeResource: (sessionId, key) => ipcRenderer.invoke('resource:remove', sessionId, key),
   getSessionStatus: (sessionId) => ipcRenderer.invoke('session:getStatus', sessionId),
+  getSessionDirectoryAvailability: (sessionId) => ipcRenderer.invoke('session:getDirectoryAvailability', sessionId),
+  openSessionDirectory: (sessionId) => ipcRenderer.invoke('session:openDirectory', sessionId),
+  openSessionFilesDirectory: (sessionId) => ipcRenderer.invoke('session:openFilesDirectory', sessionId),
+  openGeneratedFile: (sessionId, relativePath) => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath),
   openSession: (sessionId) => ipcRenderer.invoke('session:open', sessionId),
   newSession: (cwd) => ipcRenderer.invoke('session:new', cwd),
   killSession: (sessionId) => ipcRenderer.invoke('pty:kill', sessionId),
   pickDirectory: (defaultPath) => ipcRenderer.invoke('dialog:pickDirectory', defaultPath),
   changeCwd: (sessionId, cwd) => ipcRenderer.invoke('session:changeCwd', sessionId, cwd),
+  updateSessionCwdMetadata: (sessionId, cwd) => ipcRenderer.invoke('session:updateCwdMetadata', sessionId, cwd),
 
   // PTY I/O
   writePty: (sessionId, data) => ipcRenderer.send('pty:write', { sessionId, data }),
@@ -44,6 +54,15 @@ contextBridge.exposeInMainWorld('api', {
   readInstructions: () => ipcRenderer.invoke('instructions:read'),
   writeInstructions: (content) => ipcRenderer.invoke('instructions:write', content),
 
+  // Enhance instructions (backup-first workflow)
+  enhanceBackup: () => ipcRenderer.invoke('enhance:backup'),
+  enhanceListBackups: () => ipcRenderer.invoke('enhance:listBackups'),
+  enhanceGetBackupHtml: (timestamp) => ipcRenderer.invoke('enhance:getBackupHtml', timestamp),
+  enhanceRollback: (timestamp) => ipcRenderer.invoke('enhance:rollback', timestamp),
+  enhanceApply: (timestamp) => ipcRenderer.invoke('enhance:apply', timestamp),
+  enhanceDiscard: (timestamp) => ipcRenderer.invoke('enhance:discard', timestamp),
+  enhanceStartSession: () => ipcRenderer.invoke('enhance:startSession'),
+
   // Shell
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 
@@ -58,11 +77,19 @@ contextBridge.exposeInMainWorld('api', {
   // App info
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   getChangelog: () => ipcRenderer.invoke('app:getChangelog'),
+  getBrochureAvailability: () => ipcRenderer.invoke('app:getBrochureAvailability'),
+  openBrochure: () => ipcRenderer.invoke('app:openBrochure'),
+  onRestoreTabShortcut: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('shortcut:restore-tab', listener);
+    return () => ipcRenderer.removeListener('shortcut:restore-tab', listener);
+  },
 
   // Updates
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   getUpdateStatus: () => ipcRenderer.invoke('update:getStatus'),
+  applyUpdateSettings: () => ipcRenderer.invoke('update:applySettings'),
   onUpdateStatus: (callback) => {
     const listener = (event, data) => callback(data);
     ipcRenderer.on('update:status', listener);
@@ -86,4 +113,9 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('notification:click', listener);
     return () => ipcRenderer.removeListener('notification:click', listener);
   },
+
+  // Logging / diagnostics
+  revealLogs: () => ipcRenderer.invoke('logs:reveal'),
+  getLogPath: () => ipcRenderer.invoke('logs:getPath'),
+  log: (level, message) => ipcRenderer.invoke('logs:write', level, String(message)),
 });

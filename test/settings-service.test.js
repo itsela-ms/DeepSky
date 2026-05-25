@@ -30,6 +30,22 @@ describe('SettingsService', () => {
     it('theme defaults to mocha', () => {
       expect(svc.get().theme).toBe('mocha');
     });
+
+    it('useAgencyCopilot defaults to false', () => {
+      expect(svc.get().useAgencyCopilot).toBe(false);
+    });
+
+    it('statusPanelSections defaults to null', () => {
+      expect(svc.get().statusPanelSections).toBeNull();
+    });
+
+    it('sidebarHidden defaults to false', () => {
+      expect(svc.get().sidebarHidden).toBe(false);
+    });
+
+    it('activeSessions defaults to an empty array', () => {
+      expect(svc.get().activeSessions).toEqual([]);
+    });
   });
 
   describe('update + persistence', () => {
@@ -43,6 +59,34 @@ describe('SettingsService', () => {
       const svc2 = new SettingsService(tmpDir);
       await svc2.load();
       expect(svc2.get().promptForWorkdir).toBe(false);
+    });
+
+    it('persists useAgencyCopilot across load', async () => {
+      await svc.update({ useAgencyCopilot: true });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().useAgencyCopilot).toBe(true);
+    });
+
+    it('persists statusPanelSections across load', async () => {
+      await svc.update({ statusPanelSections: { summary: true, generatedFiles: true } });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().statusPanelSections).toEqual({ summary: true, generatedFiles: true });
+    });
+
+    it('persists sidebarHidden across load', async () => {
+      await svc.update({ sidebarHidden: true });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().sidebarHidden).toBe(true);
+    });
+
+    it('persists activeSessions across load', async () => {
+      await svc.update({ activeSessions: ['session-a', 'session-b'] });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().activeSessions).toEqual(['session-a', 'session-b']);
     });
 
     it('rejects unknown settings keys', async () => {

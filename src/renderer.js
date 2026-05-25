@@ -1,13 +1,56 @@
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
-const { deriveSessionState } = require('./session-state');
-const { createTerminalKeyHandler } = require('./keyboard-shortcuts');
+const { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar } = require('./session-state');
+const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey } = require('./keyboard-shortcuts');
+const { collectTerminalSearchMatches } = require('./terminal-search');
+const { resolveSidebarDragWidth } = require('./sidebar-resize');
+const { rememberRestorableClosedSession, popRestorableClosedSession } = require('./recently-closed');
+const { pruneSessionFromGroups } = require('./tab-groups');
+const { shouldApplyStatusPanelUpdate } = require('./status-panel-state');
+const { getInitialSidebarState, getNextSidebarVisibilityState } = require('./sidebar-preferences');
+const { processSessionInput, isMetadataRefreshCommand, extractMetadataCommand } = require('./session-input-tracker');
+const { trapFocusWithin, isBackdropClickTarget } = require('./modal-utils');
+const { renderDiffPreviewHtml } = require('./status-diff-preview');
+const { renderStatusSummaryMetaHtml } = require('./status-summary');
+const {
+  getHistoryEmptyState,
+  getHistoryScopeActionLabel,
+  getHistoryScopeStatusNotice,
+} = require('./history-limit');
+const { getRecentChangelogReleases } = require('./changelog-utils');
+const { createStartupLoadingController } = require('./startup-loading');
+
+// Bridge renderer console + uncaught errors into the main log file.
+// electron-log/renderer auto-pipes through preload IPC when the main process
+// has called logger.initialize({preload:true, spyRendererConsole:true}).
+try {
+  // eslint-disable-next-line global-require
+  require('electron-log/renderer');
+} catch (err) {
+  // Non-fatal: logging will still work via window.api.log() fallback.
+  console.warn('[deepsky] electron-log/renderer bridge unavailable:', err?.message || err);
+}
+
+// Forward uncaught renderer errors into the main-process log file as well.
+window.addEventListener('error', (event) => {
+  try {
+    window.api?.log?.('error', `window.error: ${event?.message} @ ${event?.filename}:${event?.lineno}:${event?.colno}`);
+  } catch {}
+});
+window.addEventListener('unhandledrejection', (event) => {
+  try {
+    const reason = event?.reason;
+    const msg = reason?.stack || reason?.message || String(reason);
+    window.api?.log?.('error', `unhandledrejection: ${msg}`);
+  } catch {}
+});
 
 // State
 const terminals = new Map();
 const sessionBusyState = new Map(); // sessionId → boolean (has recent pty output)
 const sessionAliveState = new Set(); // sessionIds with live pty processes
+const openTabIds = new Set(); // sessionIds currently shown in the tab strip
 let activeSessionId = null;
 let allSessions = [];
 let searchQuery = '';
@@ -21,10 +64,30 @@ const recentlyClosedSessions = []; // stack of session IDs closed by the user
 const sessionLastUsed = new Map();
 let creatingSession = false;
 const ipcCleanups = []; // unsubscribe fns for IPC listeners
+let sessionListRenderSeq = 0;
+let activeSessionRenameId = null;
+let activeGroupRenameId = null;
+let pendingSessionListRender = false;
+let sidebarCollapsed = false;
+let sidebarHidden = false;
+let sidebarCollapsedBeforeHidden = false;
+let lastExpandedSidebarWidth = 280;
+let statusPanelRequestSeq = 0;
+let lastFocusedElementBeforeSettings = null;
+const sessionPromptGhostState = new Map();
+let statusDiffPopover = null;
+let statusDiffHideTimer = null;
+let historyShowsAll = false;
+
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 450;
+const SIDEBAR_COLLAPSED_WIDTH = 68;
 
 // Tab group state
 let tabGroups = []; // Array of { id, name, color, collapsed, tabIds }
 let sessionOrder = []; // Manual ordering of active session IDs in sidebar
+const ABOUT_CHANGELOG_URL = 'https://github.com/itsela-ms/DeepSky/blob/main/CHANGELOG.md';
+const ABOUT_CHANGELOG_RELEASE_LIMIT = 3;
 const GROUP_COLORS = [
   { name: 'Grey', value: '#585b70' },
   { name: 'Blue', value: '#89b4fa' },
@@ -38,15 +101,20 @@ const GROUP_COLORS = [
 let nextGroupColorIdx = 0;
 
 function saveTabState() {
-  const openTabs = [...terminals.keys()];
-  window.api.updateSettings({ openTabs, activeTab: activeSessionId, tabGroups, sessionOrder });
+  const openTabs = [...openTabIds];
+  const activeSessions = [...sessionAliveState];
+  window.api.updateSettings({ openTabs, activeSessions, activeTab: activeSessionId, tabGroups, sessionOrder });
+}
+
+function isSessionListRenderLocked() {
+  return !!(activeSessionRenameId || activeGroupRenameId);
 }
 
 // Theme palettes for xterm.js
 const XTERM_THEMES = {
   mocha: {
     background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', cursorAccent: '#1e1e2e',
-    selectionBackground: '#45475a', selectionForeground: '#cdd6f4',
+    selectionBackground: '#585b70', selectionForeground: '#cdd6f4',
     black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af',
     blue: '#89b4fa', magenta: '#f5c2e7', cyan: '#94e2d5', white: '#bac2de',
     brightBlack: '#585b70', brightRed: '#f38ba8', brightGreen: '#a6e3a1', brightYellow: '#f9e2af',
@@ -54,7 +122,7 @@ const XTERM_THEMES = {
   },
   latte: {
     background: '#eff1f5', foreground: '#4c4f69', cursor: '#dc8a78', cursorAccent: '#eff1f5',
-    selectionBackground: '#acb0be', selectionForeground: '#4c4f69',
+    selectionBackground: '#8c8fa1', selectionForeground: '#4c4f69',
     black: '#5c5f77', red: '#d20f39', green: '#40a02b', yellow: '#df8e1d',
     blue: '#1e66f5', magenta: '#ea76cb', cyan: '#179299', white: '#acb0be',
     brightBlack: '#6c6f85', brightRed: '#d20f39', brightGreen: '#40a02b', brightYellow: '#df8e1d',
@@ -66,7 +134,15 @@ const XTERM_THEMES = {
 const sessionList = document.getElementById('session-list');
 const searchInput = document.getElementById('search');
 const searchClear = document.getElementById('search-clear');
+const sidebarSearchToggle = document.getElementById('sidebar-search-toggle');
 const terminalContainer = document.getElementById('terminal-container');
+const terminalPromptGhost = document.getElementById('terminal-prompt-ghost');
+const sessionSearch = document.getElementById('session-search');
+const sessionSearchInput = document.getElementById('session-search-input');
+const sessionSearchCount = document.getElementById('session-search-count');
+const sessionSearchPrev = document.getElementById('session-search-prev');
+const sessionSearchNext = document.getElementById('session-search-next');
+const sessionSearchClose = document.getElementById('session-search-close');
 const terminalTabs = document.getElementById('terminal-tabs');
 const tabsScrollArea = terminalTabs.querySelector('.tabs-scroll-area');
 const tabScrollLeft = terminalTabs.querySelector('.tab-scroll-left');
@@ -75,6 +151,7 @@ const emptyState = document.getElementById('empty-state');
 const btnNew = document.getElementById('btn-new');
 const btnNewCenter = document.getElementById('btn-new-center');
 const maxConcurrentInput = document.getElementById('max-concurrent');
+const useAgencyCopilotInput = document.getElementById('use-agency-copilot');
 const promptWorkdirInput = document.getElementById('prompt-workdir');
 const defaultWorkdirInput = document.getElementById('default-workdir');
 const btnPickDefaultWorkdir = document.getElementById('btn-pick-default-workdir');
@@ -92,28 +169,557 @@ const btnToggleStatus = document.getElementById('btn-toggle-status');
 const notificationBadge = document.getElementById('notification-badge');
 const notificationPanel = document.getElementById('notification-panel');
 const notificationListEl = document.getElementById('notification-list');
+const aboutVersionEl = document.getElementById('about-version');
+const aboutVersionTabEl = document.getElementById('about-version-tab');
+const aboutReleaseMetaEl = document.getElementById('about-release-meta');
+const aboutChangelogEl = document.getElementById('about-changelog');
+const aboutOpenBrochureBtn = document.getElementById('about-open-brochure');
+const aboutOpenChangelogBtn = document.getElementById('about-open-changelog');
 const feedbackPanel = document.getElementById('feedback-panel');
 const toastContainer = document.getElementById('toast-container');
+const notificationLiveRegion = document.getElementById('notification-live-region');
+const startupLoading = createStartupLoadingController({
+  screen: document.getElementById('startup-loading-screen'),
+  title: document.getElementById('startup-loading-title'),
+  message: document.getElementById('startup-loading-message'),
+});
+const autoUpdateToggle = document.getElementById('auto-update-enabled');
+const betaChannelToggle = document.getElementById('beta-channel');
+const betaChannelLabel = document.getElementById('beta-channel-label');
+const betaChannelRow = document.getElementById('beta-channel-row');
+const agencyLauncherRow = document.getElementById('agency-launcher-row');
+const agencyLauncherDesc = document.getElementById('agency-launcher-desc');
 
 const titlebar = document.getElementById('titlebar');
 const NOTIF_ICONS = { 'task-done': '✓', 'needs-input': '◌', 'error': '!', 'info': '·' };
 
 const OVERLAY_BASE_PX = 140;
+const DEFAULT_AGENCY_LAUNCHER_TEXT = 'Launch new sessions with agency copilot instead of the default Copilot CLI command';
+const DEFAULT_NEW_SESSION_TITLE = 'New Session (Ctrl+N)';
+const DEFAULT_NEW_SESSION_CENTER_TITLE = 'New Session (Ctrl+N)';
+
+function updateNewSessionAvailabilityState(settings = {}) {
+  const availability = getNewSessionAvailability(settings);
+  const blocked = !availability.available;
+  const title = blocked ? availability.reason : DEFAULT_NEW_SESSION_TITLE;
+  const centerTitle = blocked ? availability.reason : DEFAULT_NEW_SESSION_CENTER_TITLE;
+
+  for (const button of [btnNew, btnNewCenter]) {
+    if (!button) continue;
+    button.classList.toggle('is-blocked', blocked);
+    button.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+  }
+
+  btnNew.title = title;
+  btnNewCenter.title = centerTitle;
+
+  return availability;
+}
+
 async function syncTitlebarPadding() {
+  // On macOS, native traffic-light buttons sit on the LEFT (handled in CSS).
+  // No Windows overlay buttons on the right, so don't add right-padding.
+  if (window.api.platform === 'darwin') {
+    titlebar.style.paddingRight = '16px';
+    return;
+  }
   const zoom = await window.api.getZoom();
   titlebar.style.paddingRight = `${Math.ceil(OVERLAY_BASE_PX / zoom)}px`;
 }
 syncTitlebarPadding();
 
+if (window.api.platform === 'darwin') {
+  document.body.classList.add('platform-mac');
+} else if (window.api.platform === 'win32') {
+  document.body.classList.add('platform-win');
+} else {
+  document.body.classList.add('platform-linux');
+}
+
+let sessionSearchMatches = [];
+let sessionSearchIndex = -1;
+
+function announceLiveMessage(message) {
+  if (!notificationLiveRegion) return;
+  notificationLiveRegion.textContent = '';
+  setTimeout(() => {
+    notificationLiveRegion.textContent = message;
+  }, 0);
+}
+
+function getFocusableElements(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter((el) => !el.closest('.hidden') && el.offsetParent !== null);
+}
+
+function updateAgencyAvailabilityState(agencyAvailable, requestedValue = false) {
+  const available = agencyAvailable !== false;
+  useAgencyCopilotInput.disabled = !available;
+  useAgencyCopilotInput.checked = available && !!requestedValue;
+  if (agencyLauncherRow) {
+    agencyLauncherRow.classList.toggle('disabled', !available);
+  }
+  if (agencyLauncherDesc) {
+    agencyLauncherDesc.textContent = available
+      ? DEFAULT_AGENCY_LAUNCHER_TEXT
+      : 'Agency is not installed on this machine, so DeepSky will keep using the default Copilot CLI command.';
+  }
+}
+
+async function restoreMostRecentClosedTab() {
+  const validIds = await getAllValidSessionIds();
+  const sessionId = popRestorableClosedSession(recentlyClosedSessions, validIds);
+  if (sessionId) {
+    await openSession(sessionId);
+  }
+}
+
+function applySettingsToControls(settings, { includeSidebar = false } = {}) {
+  window._cachedSettings = { ...(window._cachedSettings || {}), ...settings };
+  maxConcurrentInput.value = settings.maxConcurrent;
+  promptWorkdirInput.checked = !!settings.promptForWorkdir;
+  defaultWorkdirInput.value = settings.defaultWorkdir || '';
+  autoUpdateToggle.checked = settings.autoUpdateEnabled !== false;
+  betaChannelToggle.checked = settings.updateChannel === 'beta';
+  betaChannelRow.classList.toggle('disabled', !autoUpdateToggle.checked);
+  betaChannelToggle.disabled = !autoUpdateToggle.checked;
+  updateAgencyAvailabilityState(settings.agencyAvailable, settings.useAgencyCopilot);
+  updateNewSessionAvailabilityState(window._cachedSettings);
+  applyTheme(settings.theme || 'mocha');
+
+  if (includeSidebar) {
+    const sidebarState = getInitialSidebarState(settings);
+    lastExpandedSidebarWidth = sidebarState.lastExpandedSidebarWidth;
+    sidebarCollapsed = sidebarState.sidebarCollapsed;
+    sidebarHidden = sidebarState.sidebarHidden;
+    sidebarCollapsedBeforeHidden = sidebarState.sidebarCollapsed;
+    syncSidebarCollapsedUi();
+  }
+}
+
+function getActiveTerminalEntry() {
+  return activeSessionId ? terminals.get(activeSessionId) : null;
+}
+
+function updateSessionSearchUi() {
+  const hasQuery = !!sessionSearchInput.value.trim();
+  const hasMatches = sessionSearchMatches.length > 0;
+  if (!hasQuery) {
+    sessionSearchCount.textContent = '';
+  } else {
+    sessionSearchCount.textContent = hasMatches ? `${sessionSearchIndex + 1}/${sessionSearchMatches.length}` : '0/0';
+  }
+  sessionSearchPrev.disabled = !hasMatches;
+  sessionSearchNext.disabled = !hasMatches;
+}
+
+function clearActiveTerminalSelection() {
+  const entry = getActiveTerminalEntry();
+  if (entry) entry.terminal.clearSelection();
+}
+
+function syncTerminalViewport(sessionId, { refreshSearch = false } = {}) {
+  const entry = terminals.get(sessionId);
+  if (!entry || entry.isSyncingViewport) return;
+
+  entry.isSyncingViewport = true;
+  try {
+    entry.terminal._core?.viewport?.syncScrollArea(true);
+
+    if (
+      refreshSearch &&
+      sessionId === activeSessionId &&
+      !sessionSearch.classList.contains('hidden') &&
+      sessionSearchInput.value.trim()
+    ) {
+      refreshSessionSearch(true);
+    }
+  } finally {
+    entry.isSyncingViewport = false;
+  }
+}
+
+function scheduleTerminalViewportSync(sessionId, { refreshSearch = false } = {}) {
+  const entry = terminals.get(sessionId);
+  if (!entry) return;
+
+  entry.pendingViewportRefreshSearch = entry.pendingViewportRefreshSearch || refreshSearch;
+  if (entry.viewportSyncTimer) clearTimeout(entry.viewportSyncTimer);
+  entry.viewportSyncTimer = setTimeout(() => {
+    entry.viewportSyncTimer = null;
+    const currentEntry = terminals.get(sessionId);
+    if (!currentEntry) return;
+    const shouldRefreshSearch = !!currentEntry.pendingViewportRefreshSearch;
+    currentEntry.pendingViewportRefreshSearch = false;
+
+    requestAnimationFrame(() => {
+      syncTerminalViewport(sessionId, { refreshSearch: shouldRefreshSearch });
+    });
+  }, 20);
+}
+
+function collectSessionSearchMatches(query) {
+  const entry = getActiveTerminalEntry();
+  if (!entry || !query) return [];
+  return collectTerminalSearchMatches(entry.terminal.buffer.active, entry.terminal.cols, query);
+}
+
+function revealSessionSearchMatch(index, keepSearchFocus = false) {
+  if (index < 0 || index >= sessionSearchMatches.length) return false;
+  const entry = getActiveTerminalEntry();
+  const match = sessionSearchMatches[index];
+  if (!entry || !match) return false;
+  const matchSessionId = activeSessionId;
+
+  sessionSearchIndex = index;
+  updateSessionSearchUi();
+
+  const targetViewportY = Math.max(0, match.row - Math.floor(entry.terminal.rows / 2));
+  syncTerminalViewport(matchSessionId);
+  entry.terminal.scrollToLine(targetViewportY);
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (activeSessionId !== matchSessionId) return;
+      const currentEntry = terminals.get(matchSessionId);
+      if (!currentEntry) return;
+      syncTerminalViewport(matchSessionId);
+      currentEntry.terminal.clearSelection();
+      currentEntry.terminal.select(match.col, match.row, match.length);
+      if (keepSearchFocus) sessionSearchInput.focus();
+      else currentEntry.terminal.focus();
+    });
+  });
+
+  return true;
+}
+
+function refreshSessionSearch(preserveIndex = false) {
+  const trimmed = sessionSearchInput.value.trim();
+  if (!trimmed || !activeSessionId) {
+    sessionSearchMatches = [];
+    sessionSearchIndex = -1;
+    clearActiveTerminalSelection();
+    updateSessionSearchUi();
+    return;
+  }
+
+  const previousIndex = preserveIndex ? sessionSearchIndex : -1;
+  sessionSearchMatches = collectSessionSearchMatches(trimmed);
+  if (!sessionSearchMatches.length) {
+    sessionSearchIndex = -1;
+    clearActiveTerminalSelection();
+    updateSessionSearchUi();
+    return;
+  }
+
+  const nextIndex = previousIndex >= 0
+    ? Math.min(previousIndex, sessionSearchMatches.length - 1)
+    : 0;
+  revealSessionSearchMatch(nextIndex, true);
+}
+
+function stepSessionSearch(direction) {
+  if (!sessionSearchMatches.length) {
+    refreshSessionSearch(false);
+    return;
+  }
+  const nextIndex = sessionSearchIndex < 0
+    ? 0
+    : (sessionSearchIndex + direction + sessionSearchMatches.length) % sessionSearchMatches.length;
+  revealSessionSearchMatch(nextIndex, true);
+}
+
+function openSessionSearch() {
+  if (!activeSessionId || !terminals.has(activeSessionId)) {
+    focusSidebarSearch();
+    return;
+  }
+
+  sessionSearch.classList.remove('hidden');
+  updateSessionSearchUi();
+  refreshSessionSearch(true);
+  requestAnimationFrame(() => {
+    sessionSearchInput.focus();
+    sessionSearchInput.select();
+  });
+}
+
+function closeSessionSearch({ restoreTerminalFocus = true } = {}) {
+  sessionSearch.classList.add('hidden');
+  sessionSearchInput.value = '';
+  sessionSearchMatches = [];
+  sessionSearchIndex = -1;
+  clearActiveTerminalSelection();
+  updateSessionSearchUi();
+
+  if (restoreTerminalFocus) {
+    const entry = getActiveTerminalEntry();
+    if (entry) entry.terminal.focus();
+  }
+}
+
+function getSessionPromptGhost(sessionId) {
+  if (!sessionPromptGhostState.has(sessionId)) {
+    sessionPromptGhostState.set(sessionId, {
+      lastPrompt: '',
+      isTyping: false,
+      requestSeq: 0,
+      pendingCommandLine: ''
+    });
+  }
+  return sessionPromptGhostState.get(sessionId);
+}
+
+function updateSessionPromptGhost(sessionId) {
+  if (!terminalPromptGhost) return;
+
+  if (!sessionId || sessionId !== activeSessionId) {
+    terminalPromptGhost.innerHTML = '';
+    terminalPromptGhost.classList.add('empty');
+    return;
+  }
+
+  const session = allSessions.find(s => s.id === sessionId);
+  const title = session?.title || 'New Session';
+  const shortId = sessionId.substring(0, 8);
+  const state = getSessionPromptGhost(sessionId);
+  const lastPrompt = state.lastPrompt || '';
+
+  const esc = (s) => { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; };
+
+  let html = `<span class="info-badge">Session Context</span><span class="info-title">${esc(title)}</span>`;
+  if (lastPrompt) {
+    html += `<span class="info-divider">│</span>`;
+    html += `<span class="info-prompt" title="${esc(lastPrompt)}">💬 ${esc(lastPrompt)}</span>`;
+  }
+
+  terminalPromptGhost.innerHTML = html;
+  terminalPromptGhost.classList.remove('empty');
+}
+
+function scheduleSessionMetadataRefresh(sessionId, delays = [500, 1500, 4000]) {
+  for (const delay of delays) {
+    setTimeout(() => {
+      if (terminals.has(sessionId)) refreshSessionList();
+    }, delay);
+  }
+}
+
+function scheduleSessionPromptGhostRefresh(sessionId, delays = [0, 400, 1200]) {
+  const state = getSessionPromptGhost(sessionId);
+  const requestId = ++state.requestSeq;
+  const runRefresh = async () => {
+    try {
+      const lastPrompt = await window.api.getLastUserPrompt(sessionId);
+      const currentState = getSessionPromptGhost(sessionId);
+      if (currentState.requestSeq !== requestId) return;
+      currentState.lastPrompt = lastPrompt || '';
+      updateSessionPromptGhost(sessionId);
+    } catch {
+      // Ignore transient transcript-read failures.
+    }
+  };
+
+  for (const delay of delays) {
+    setTimeout(runRefresh, delay);
+  }
+}
+
+function handleSessionPromptInput(sessionId, data) {
+  const state = getSessionPromptGhost(sessionId);
+  if (!data) return;
+
+  const nextCommandState = processSessionInput({ line: state.pendingCommandLine }, data, (command) => {
+    if (isMetadataRefreshCommand(command)) {
+      const metadataCommand = extractMetadataCommand(command);
+      if (metadataCommand?.type === 'cwd') {
+        window.api.updateSessionCwdMetadata(sessionId, metadataCommand.value)
+          .then(() => {
+            const session = allSessions.find(s => s.id === sessionId);
+            if (session) session.cwd = metadataCommand.value;
+            scheduleRenderSessionList();
+            if (sessionId === activeSessionId) {
+              updateStatusPanel(sessionId);
+            }
+          })
+          .catch(() => {
+            showToast({
+              type: 'error',
+              title: 'Could not update working directory',
+              body: metadataCommand.value,
+            });
+          });
+      }
+      scheduleSessionMetadataRefresh(sessionId);
+    }
+  });
+  state.pendingCommandLine = nextCommandState.line;
+
+  if (data.includes('\r') || data.includes('\n')) {
+    state.isTyping = false;
+    // Transcript takes time to be written after send — use longer delays
+    scheduleSessionPromptGhostRefresh(sessionId, [800, 2000, 5000]);
+    return;
+  }
+
+  state.isTyping = true;
+}
+
+function matchesSidebarMetadata(session, queryLower) {
+  if (session.title.toLowerCase().includes(queryLower)) return true;
+  if (session.cwd && session.cwd.toLowerCase().includes(queryLower)) return true;
+  if (session.tags && session.tags.some(tag => tag.toLowerCase().includes(queryLower))) return true;
+  if (session.resources && session.resources.some(resource =>
+    String(resource.id || '').toLowerCase().includes(queryLower) ||
+    String(resource.url || '').toLowerCase().includes(queryLower) ||
+    String(resource.name || '').toLowerCase().includes(queryLower) ||
+    String(resource.repo || '').toLowerCase().includes(queryLower)
+  )) {
+    return true;
+  }
+  return false;
+}
+
+function ensureSessionPlaceholder(sessionId, fallback = {}) {
+  let session = allSessions.find(existing => existing.id === sessionId);
+  if (session) return session;
+
+  session = {
+    id: sessionId,
+    title: fallback.title || sessionId.substring(0, 8),
+    cwd: fallback.cwd || '',
+    updatedAt: new Date().toISOString(),
+    tags: [],
+    resources: []
+  };
+  allSessions.unshift(session);
+  return session;
+}
+
+function appendHistoryScopeNotice() {
+  if (currentSidebarTab !== 'history' || sidebarCollapsed) return;
+  const noticeEl = document.createElement('div');
+  noticeEl.className = 'history-scope-note';
+
+  const copyEl = document.createElement('div');
+  copyEl.className = 'history-scope-note-copy';
+  copyEl.textContent = getHistoryScopeStatusNotice(historyShowsAll);
+
+  const actionEl = document.createElement('button');
+  actionEl.type = 'button';
+  actionEl.className = 'history-scope-action';
+  actionEl.textContent = getHistoryScopeActionLabel(historyShowsAll);
+
+  noticeEl.appendChild(copyEl);
+  noticeEl.appendChild(actionEl);
+  sessionList.appendChild(noticeEl);
+}
+
+function getSidebarSessionScope() {
+  if (currentSidebarTab === 'history') {
+    return historyShowsAll ? 'all' : 'history';
+  }
+  return currentSidebarTab;
+}
+
+function syncSidebarCollapsedUi() {
+  lastExpandedSidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, lastExpandedSidebarWidth));
+  sidebar.classList.toggle('collapsed', sidebarCollapsed && !sidebarHidden);
+  sidebar.classList.toggle('hidden-full', sidebarHidden);
+  resizeHandle.classList.toggle('collapsed', sidebarCollapsed || sidebarHidden);
+  resizeHandle.classList.toggle('sidebar-hidden', sidebarHidden);
+  if (sidebarHidden) {
+    sidebar.style.width = '0px';
+  } else {
+    sidebar.style.width = `${sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : lastExpandedSidebarWidth}px`;
+  }
+}
+
+function setSidebarCollapsed(collapsed, { persist = true } = {}) {
+  if (collapsed === sidebarCollapsed && sidebar.style.width) {
+    syncSidebarCollapsedUi();
+    return;
+  }
+
+  if (collapsed) {
+    const currentWidth = parseInt(sidebar.style.width, 10) || Math.round(sidebar.getBoundingClientRect().width) || lastExpandedSidebarWidth;
+    if (currentWidth >= SIDEBAR_MIN_WIDTH) lastExpandedSidebarWidth = currentWidth;
+  }
+
+  sidebarCollapsed = collapsed;
+  if (!sidebarHidden) sidebarCollapsedBeforeHidden = collapsed;
+  syncSidebarCollapsedUi();
+
+  if (window._cachedSettings) {
+    window._cachedSettings.sidebarCollapsed = collapsed;
+    window._cachedSettings.sidebarWidth = lastExpandedSidebarWidth;
+  }
+
+  if (persist) window.api.updateSettings({ sidebarCollapsed: collapsed });
+  renderSessionList();
+  fitActiveTerminal();
+}
+
+function setSidebarHidden(hidden, { persist = true } = {}) {
+  const nextState = getNextSidebarVisibilityState({
+    sidebarCollapsed,
+    sidebarCollapsedBeforeHidden,
+  }, hidden);
+  sidebarHidden = nextState.sidebarHidden;
+  sidebarCollapsed = nextState.sidebarCollapsed;
+  sidebarCollapsedBeforeHidden = nextState.sidebarCollapsedBeforeHidden;
+  syncSidebarCollapsedUi();
+
+  if (window._cachedSettings) {
+    window._cachedSettings.sidebarHidden = sidebarHidden;
+    window._cachedSettings.sidebarCollapsed = sidebarCollapsed;
+  }
+
+  if (persist) {
+    window.api.updateSettings({
+      sidebarHidden,
+      sidebarCollapsed,
+    });
+  }
+  renderSessionList();
+  fitActiveTerminal();
+}
+
+function persistSidebarWidth(width) {
+  lastExpandedSidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width));
+  if (window._cachedSettings) window._cachedSettings.sidebarWidth = lastExpandedSidebarWidth;
+  window.api.updateSettings({ sidebarWidth: lastExpandedSidebarWidth });
+}
+
+function focusSidebarSearch() {
+  if (sidebarHidden) setSidebarHidden(false);
+  if (sidebarCollapsed) setSidebarCollapsed(false);
+  requestAnimationFrame(() => {
+    searchInput.focus();
+    searchInput.select();
+    document.getElementById('search-wrapper').classList.add('search-active');
+  });
+}
+
 // Delegated event handling for session list items (avoids per-item listener churn)
 let _titleClickTimeout = null;
 let _titleClickSessionId = null;
 sessionList.addEventListener('click', (e) => {
+  const historyScopeAction = e.target.closest('.history-scope-action');
+  if (historyScopeAction) {
+    e.stopPropagation();
+    historyShowsAll = !historyShowsAll;
+    void refreshSessionList();
+    return;
+  }
   const closeBtn = e.target.closest('.session-close');
   if (closeBtn) {
     e.stopPropagation();
     const item = closeBtn.closest('.session-item');
-    if (item) closeTab(item.dataset.sessionId);
+    if (item) terminateSession(item.dataset.sessionId, { rememberClosedTab: true });
     return;
   }
   const deleteBtn = e.target.closest('.session-delete');
@@ -132,6 +738,15 @@ sessionList.addEventListener('click', (e) => {
     e.stopPropagation();
     const sid = cwdEl.dataset.sessionId;
     if (sid) handleCwdClick(sid);
+    return;
+  }
+  // Tag overflow click → expand hidden tags
+  const overflowTag = e.target.closest('.tag-overflow');
+  if (overflowTag) {
+    e.stopPropagation();
+    overflowTag.classList.add('expanded');
+    const hidden = overflowTag.parentElement.querySelector('.tags-hidden');
+    if (hidden) hidden.classList.add('expanded');
     return;
   }
   const titleEl = e.target.closest('.session-title');
@@ -181,15 +796,12 @@ sessionList.addEventListener('keydown', (e) => {
 
 // Initialize
 async function init() {
+  startupLoading.setStatus({
+    titleText: 'Starting DeepSky...',
+    messageText: 'Loading settings...',
+  });
   const settings = await window.api.getSettings();
-  window._cachedSettings = settings;
-  maxConcurrentInput.value = settings.maxConcurrent;
-  promptWorkdirInput.checked = !!settings.promptForWorkdir;
-  defaultWorkdirInput.value = settings.defaultWorkdir || '';
-  if (settings.sidebarWidth) {
-    document.getElementById('sidebar').style.width = settings.sidebarWidth + 'px';
-  }
-  applyTheme(settings.theme || 'mocha');
+  applySettingsToControls(settings, { includeSidebar: true });
 
   // Restore last sidebar tab — must be set BEFORE refreshSessionList
   if (settings.lastActiveTab) {
@@ -199,27 +811,28 @@ async function init() {
     });
   }
 
+  startupLoading.setStatus({
+    titleText: 'Loading sessions...',
+    messageText: 'Preparing your sidebar and saved session history...',
+  });
   await refreshSessionList();
 
   // Clean up any previous IPC listeners (guards against double-init on reload)
   while (ipcCleanups.length) ipcCleanups.pop()();
 
-  let scrollSyncTimer = null;
   ipcCleanups.push(window.api.onPtyData((sessionId, data) => {
     const entry = terminals.get(sessionId);
-    if (entry) entry.terminal.write(data);
+    if (entry) {
+      entry.terminal.write(data, () => {
+        scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+      });
+    }
     sessionAliveState.add(sessionId);
     sessionBusyState.set(sessionId, true);
     patchSessionStateBadges();
-    // Debounced viewport sync to keep scroll area accurate as content grows
-    if (sessionId === activeSessionId && entry) {
-      if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
-      scrollSyncTimer = setTimeout(() => {
-        scrollSyncTimer = null;
-        const e = terminals.get(activeSessionId);
-        e?.terminal._core?.viewport?.syncScrollArea(true);
-      }, 150);
-    }
+  }));
+  ipcCleanups.push(window.api.onRestoreTabShortcut(() => {
+    void restoreMostRecentClosedTab();
   }));
 
   ipcCleanups.push(window.api.onPtyExit((sessionId, exitCode) => {
@@ -229,7 +842,9 @@ async function init() {
     const entry = terminals.get(sessionId);
     if (entry) {
       entry.exited = true;
-      entry.terminal.write(`\r\n\x1b[90m[Session ended with code ${exitCode}]\x1b[0m\r\n`);
+      entry.terminal.write(`\r\n\x1b[90m[Session ended with code ${exitCode}]\x1b[0m\r\n`, () => {
+        scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+      });
       // Dispose terminal after a short delay so the exit message is visible
       entry.exitTimeout = setTimeout(() => {
         const e = terminals.get(sessionId);
@@ -238,11 +853,10 @@ async function init() {
           e.terminal.dispose();
           e.wrapper.remove();
           terminals.delete(sessionId);
-          const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
-          if (tab) tab.remove();
-          updateTabScrollButtons();
+          removeTabUi(sessionId);
           if (activeSessionId === sessionId) {
             activeSessionId = null;
+            updateSessionPromptGhost(null);
             const remaining = document.querySelectorAll('.tab');
             if (remaining.length > 0) switchToSession(remaining[remaining.length - 1].dataset.sessionId);
             else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
@@ -273,11 +887,10 @@ async function init() {
       entry.wrapper.remove();
       terminals.delete(sessionId);
     }
-    const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
-    if (tab) tab.remove();
-    updateTabScrollButtons();
+    removeTabUi(sessionId);
     if (activeSessionId === sessionId) {
       activeSessionId = null;
+      updateSessionPromptGhost(null);
       const remaining = document.querySelectorAll('.tab');
       if (remaining.length > 0) switchToSession(remaining[remaining.length - 1].dataset.sessionId);
       else { emptyState.classList.remove('hidden'); updateStatusPanel(null); }
@@ -303,21 +916,40 @@ async function init() {
       currentSidebarTab = tab.dataset.tab;
       document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      renderSessionList();
+      void refreshSessionList();
       window.api.updateSettings({ lastActiveTab: currentSidebarTab });
     });
   });
 
   // Settings modal
-  btnSettings.addEventListener('click', openSettings);
+  btnSettings.addEventListener('click', () => { void openSettings(); });
 
   // Home link — deselect active session
   document.getElementById('titlebar-home').addEventListener('click', showHome);
   settingsOverlay.querySelector('.settings-close').addEventListener('click', closeSettings);
   settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
+  settingsOverlay.addEventListener('keydown', (e) => {
+    if (settingsOverlay.classList.contains('hidden')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSettings();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusable = getFocusableElements(settingsOverlay);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
 
-  // Update button
-  document.getElementById('btn-check-update').addEventListener('click', () => window.api.checkForUpdates());
+  // Update status listener (auto-update only, no manual button)
   ipcCleanups.push(window.api.onUpdateStatus(handleUpdateStatus));
 
   // Theme switcher
@@ -336,6 +968,67 @@ async function init() {
     statusPanel.classList.add('collapsed');
     btnToggleStatus.classList.remove('active');
     fitActiveTerminal();
+  });
+  statusPanelBody.addEventListener('click', async (event) => {
+    const copyButton = event.target.closest('.status-copy-session-id');
+    if (copyButton) {
+      const sessionId = copyButton.dataset.sessionId;
+      if (!sessionId) return;
+
+      try {
+        await window.api.copyText(sessionId);
+        showToast({ type: 'success', title: 'Session ID copied', body: sessionId });
+      } catch {
+        showToast({ type: 'error', title: 'Copy failed', body: 'Could not copy the session ID.' });
+      }
+      return;
+    }
+
+    const openDirectoryButton = event.target.closest('.status-open-session-directory');
+    if (openDirectoryButton) {
+      const sessionId = openDirectoryButton.dataset.sessionId;
+      if (!sessionId) return;
+
+      const result = await window.api.openSessionDirectory(sessionId);
+      if (!result?.ok) {
+        showToast({
+          type: 'error',
+          title: 'Could not open session directory',
+          body: result?.error || sessionId,
+        });
+      }
+      return;
+    }
+
+    const openFilesDirectoryButton = event.target.closest('.status-open-session-files-directory');
+    if (openFilesDirectoryButton) {
+      const sessionId = openFilesDirectoryButton.dataset.sessionId;
+      if (!sessionId) return;
+
+      const result = await window.api.openSessionFilesDirectory(sessionId);
+      if (!result?.ok) {
+        showToast({
+          type: 'error',
+          title: 'Could not open files folder',
+          body: result?.error || sessionId,
+        });
+      }
+      return;
+    }
+  });
+  statusPanelBody.addEventListener('mouseover', (event) => {
+    const fileItem = event.target.closest('.status-file-item[data-diff]');
+    if (!fileItem || !statusPanelBody.contains(fileItem)) return;
+    const diff = decodeURIComponent(fileItem.dataset.diff || '');
+    if (!diff) return;
+    showStatusDiffPopover(fileItem, diff);
+  });
+  statusPanelBody.addEventListener('mouseout', (event) => {
+    const fileItem = event.target.closest('.status-file-item[data-diff]');
+    if (!fileItem) return;
+    const next = event.relatedTarget;
+    if (fileItem.contains(next) || statusDiffPopover?.contains(next)) return;
+    scheduleHideStatusDiffPopover();
   });
 
   // Tab scroll buttons
@@ -386,11 +1079,27 @@ async function init() {
     }
   }));
 
+  startupLoading.setStatus({
+    titleText: 'Loading notifications...',
+    messageText: 'Syncing alerts and startup status...',
+  });
   await refreshNotifications();
+
+  startupLoading.setStatus({
+    titleText: 'Restoring workspace...',
+    messageText: 'Reopening live sessions and previously open tabs...',
+  });
+  const validIds = await getAllValidSessionIds();
+
+  // Restore previously active sessions without forcing them into tabs.
+  if (Array.isArray(settings.activeSessions) && settings.activeSessions.length > 0) {
+    const activeSessionsToRestore = settings.activeSessions.filter(id => validIds.has(id));
+    await Promise.allSettled(activeSessionsToRestore.map(id => window.api.openSession(id)));
+    await updateSessionBusyStates();
+  }
 
   // Restore previously open tabs
   if (settings.openTabs && settings.openTabs.length > 0) {
-    const validIds = new Set(allSessions.map(s => s.id));
     const tabsToRestore = settings.openTabs.filter(id => validIds.has(id));
     await Promise.allSettled(tabsToRestore.map(id => openSession(id)));
 
@@ -398,28 +1107,35 @@ async function init() {
     if (Array.isArray(settings.tabGroups) && settings.tabGroups.length > 0) {
       tabGroups = settings.tabGroups.filter(g =>
         g && typeof g.id === 'string' && typeof g.name === 'string' &&
-        Array.isArray(g.tabIds) && g.tabIds.some(id => terminals.has(id))
+        Array.isArray(g.tabIds) && g.tabIds.some(id => openTabIds.has(id))
       ).map(g => ({
         id: g.id,
         name: (g.name || 'Group').substring(0, 50),
         color: g.color || GROUP_COLORS[0].value,
         collapsed: !!g.collapsed,
-        tabIds: g.tabIds.filter(id => terminals.has(id)),
+        tabIds: g.tabIds.filter(id => openTabIds.has(id)),
       }));
     }
 
     // Restore session order
     if (Array.isArray(settings.sessionOrder) && settings.sessionOrder.length > 0) {
-      sessionOrder = settings.sessionOrder.filter(id => terminals.has(id));
+      sessionOrder = settings.sessionOrder.filter(id => sessionAliveState.has(id));
     }
 
     renderSessionList();
 
     // Switch to the previously active tab
-    if (settings.activeTab && terminals.has(settings.activeTab)) {
+    if (settings.activeTab && openTabIds.has(settings.activeTab)) {
       switchToSession(settings.activeTab);
     }
+  } else {
+    renderSessionList();
   }
+
+  startupLoading.setStatus({
+    titleText: 'Finishing startup...',
+    messageText: 'DeepSky is almost ready.',
+  });
 }
 
 function applyTheme(theme) {
@@ -436,43 +1152,217 @@ function applyTheme(theme) {
   settingsOverlay.querySelectorAll('.theme-option').forEach(b => b.classList.toggle('active', b.dataset.theme === theme));
 }
 
-function openSettings() {
+async function openSettings() {
+  lastFocusedElementBeforeSettings = document.activeElement;
+  const settings = await window.api.getSettings();
+  applySettingsToControls(settings);
   settingsOverlay.classList.remove('hidden');
+  settingsOverlay.setAttribute('aria-hidden', 'false');
   populateAboutSection();
+  requestAnimationFrame(() => {
+    (settingsOverlay.querySelector('.settings-tab.active') || settingsOverlay.querySelector('.settings-close'))?.focus();
+  });
+}
+
+// Settings tab switching
+settingsOverlay.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const target = tab.dataset.settingsTab;
+    settingsOverlay.querySelectorAll('.settings-tab').forEach(t => t.classList.toggle('active', t.dataset.settingsTab === target));
+    settingsOverlay.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.toggle('active', p.dataset.settingsPanel === target));
+  });
+});
+
+aboutOpenChangelogBtn?.addEventListener('click', () => {
+  window.api.openExternal(ABOUT_CHANGELOG_URL);
+});
+
+aboutOpenBrochureBtn?.addEventListener('click', async () => {
+  const result = await window.api.openBrochure();
+  if (!result?.ok) {
+    showToast({
+      type: 'error',
+      title: 'Could not open brochure',
+      body: result?.error || 'DeepSky brochure was not found on this machine.',
+    });
+  }
+});
+
+function appendInlineMarkdown(target, text) {
+  const tokens = String(text || '')
+    .split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g)
+    .filter(Boolean);
+
+  if (!tokens.length) {
+    target.textContent = text || '';
+    return;
+  }
+
+  for (const token of tokens) {
+    const strongMatch = token.match(/^\*\*(.+)\*\*$/);
+    if (strongMatch) {
+      const strong = document.createElement('strong');
+      strong.textContent = strongMatch[1];
+      target.appendChild(strong);
+      continue;
+    }
+
+    const codeMatch = token.match(/^`(.+)`$/);
+    if (codeMatch) {
+      const code = document.createElement('code');
+      code.textContent = codeMatch[1];
+      target.appendChild(code);
+      continue;
+    }
+
+    const linkMatch = token.match(/^\[([^\]]+)\]\([^)]+\)$/);
+    target.appendChild(document.createTextNode(linkMatch ? linkMatch[1] : token));
+  }
+}
+
+function createAboutReleaseCard(release, currentVersion) {
+  const isCurrentBuild = release.version === currentVersion;
+  const card = document.createElement('section');
+  card.className = 'about-release-card';
+  if (isCurrentBuild) {
+    card.classList.add('current');
+  }
+
+  const header = document.createElement('div');
+  header.className = 'about-release-header';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'about-release-title-row';
+
+  const versionEl = document.createElement('div');
+  versionEl.className = 'about-release-version';
+  versionEl.textContent = release.version;
+  titleRow.appendChild(versionEl);
+
+  if (isCurrentBuild) {
+    const badge = document.createElement('span');
+    badge.className = 'about-release-badge';
+    badge.textContent = 'Current build';
+    titleRow.appendChild(badge);
+  }
+
+  const dateEl = document.createElement('div');
+  dateEl.className = 'about-release-date';
+  dateEl.textContent = release.date;
+
+  header.appendChild(titleRow);
+  header.appendChild(dateEl);
+  card.appendChild(header);
+
+  for (const section of release.sections) {
+    if (!section.items.length) {
+      continue;
+    }
+
+    const sectionEl = document.createElement('div');
+    sectionEl.className = 'about-release-section';
+
+    const sectionTitle = document.createElement('div');
+    sectionTitle.className = 'about-release-section-title';
+    sectionTitle.textContent = section.title;
+    sectionEl.appendChild(sectionTitle);
+
+    const list = document.createElement('ul');
+    list.className = 'about-release-list';
+
+    for (const item of section.items) {
+      const listItem = document.createElement('li');
+      appendInlineMarkdown(listItem, item);
+      list.appendChild(listItem);
+    }
+
+    sectionEl.appendChild(list);
+    card.appendChild(sectionEl);
+  }
+
+  return card;
+}
+
+function renderAboutChangelog(changelog, version) {
+  if (!aboutChangelogEl) {
+    return;
+  }
+
+  aboutChangelogEl.replaceChildren();
+  const releases = getRecentChangelogReleases(changelog, ABOUT_CHANGELOG_RELEASE_LIMIT);
+
+  if (aboutReleaseMetaEl) {
+    if (!releases.length) {
+      aboutReleaseMetaEl.textContent = `App version v${version}`;
+    } else {
+      aboutReleaseMetaEl.textContent =
+        `App version v${version} - showing the latest ${releases.length} changelog entr${releases.length === 1 ? 'y' : 'ies'}.`;
+    }
+  }
+
+  if (!releases.length) {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'about-changelog-empty';
+    emptyState.textContent = 'No changelog available.';
+    aboutChangelogEl.appendChild(emptyState);
+    return;
+  }
+
+  for (const release of releases) {
+    aboutChangelogEl.appendChild(createAboutReleaseCard(release, version));
+  }
 }
 
 async function populateAboutSection() {
   const version = await window.api.getVersion();
   const changelog = await window.api.getChangelog();
-  document.getElementById('about-version').textContent = `v${version}`;
-  const changelogEl = document.getElementById('about-changelog');
-  changelogEl.textContent = changelog || 'No changelog available.';
+  const brochureAvailability = await window.api.getBrochureAvailability();
+  if (aboutVersionEl) aboutVersionEl.textContent = `v${version}`;
+  if (aboutVersionTabEl) aboutVersionTabEl.textContent = `DeepSky v${version}`;
+  if (aboutOpenBrochureBtn) {
+    aboutOpenBrochureBtn.disabled = !brochureAvailability?.available;
+    aboutOpenBrochureBtn.title = brochureAvailability?.available
+      ? 'Open the DeepSky brochure'
+      : 'DeepSky brochure was not found on this machine.';
+  }
+  renderAboutChangelog(changelog, version);
+
+  // Populate current log file path (for diagnostics)
+  try {
+    const logInfo = await window.api.getLogPath?.();
+    const logPathEl = document.getElementById('about-log-path');
+    if (logPathEl && logInfo?.file) logPathEl.textContent = logInfo.file;
+  } catch {}
 
   // Restore current update status
   const updateData = await window.api.getUpdateStatus();
   if (updateData) handleUpdateStatus(updateData);
 }
 
+document.getElementById('btn-reveal-logs')?.addEventListener('click', async () => {
+  try {
+    await window.api.revealLogs();
+  } catch (err) {
+    console.error('Reveal logs failed:', err);
+  }
+});
+
 function handleUpdateStatus(data) {
   const statusEl = document.getElementById('update-status');
   const progressEl = document.getElementById('update-progress');
   const progressBar = document.getElementById('update-progress-bar');
-  const btnCheck = document.getElementById('btn-check-update');
 
   statusEl.classList.remove('hidden');
   progressEl.classList.add('hidden');
-  btnCheck.disabled = false;
 
   switch (data.status) {
     case 'checking':
       statusEl.textContent = 'Checking for updates…';
-      btnCheck.disabled = true;
       break;
     case 'available':
       statusEl.textContent = `Downloading v${data.info?.version}…`;
       statusEl.className = 'update-status';
       setUpdateBadge(true, data.info?.version, false);
-      btnCheck.disabled = true;
       break;
     case 'not-available':
       statusEl.textContent = 'You\'re on the latest version.';
@@ -483,7 +1373,6 @@ function handleUpdateStatus(data) {
       statusEl.textContent = `Downloading… ${Math.round(data.progress?.percent || 0)}%`;
       progressEl.classList.remove('hidden');
       progressBar.style.width = `${data.progress?.percent || 0}%`;
-      btnCheck.disabled = true;
       break;
     case 'downloaded':
       statusEl.textContent = `v${data.info?.version} will be installed on next quit.`;
@@ -522,10 +1411,74 @@ function setUpdateBadge(show, version, notify) {
 
 function closeSettings() {
   settingsOverlay.classList.add('hidden');
+  settingsOverlay.setAttribute('aria-hidden', 'true');
+  lastFocusedElementBeforeSettings?.focus?.();
+  lastFocusedElementBeforeSettings = null;
+}
+
+function ensureStatusDiffPopover() {
+  if (statusDiffPopover) return statusDiffPopover;
+  statusDiffPopover = document.createElement('div');
+  statusDiffPopover.className = 'status-diff-popover hidden';
+  statusDiffPopover.addEventListener('mouseenter', () => {
+    if (statusDiffHideTimer) {
+      clearTimeout(statusDiffHideTimer);
+      statusDiffHideTimer = null;
+    }
+  });
+  statusDiffPopover.addEventListener('mouseleave', () => {
+    scheduleHideStatusDiffPopover();
+  });
+  document.body.appendChild(statusDiffPopover);
+  return statusDiffPopover;
+}
+
+function scheduleHideStatusDiffPopover() {
+  if (statusDiffHideTimer) clearTimeout(statusDiffHideTimer);
+  statusDiffHideTimer = setTimeout(() => {
+    statusDiffPopover?.classList.add('hidden');
+    statusDiffHideTimer = null;
+  }, 120);
+}
+
+function hideStatusDiffPopover() {
+  if (statusDiffHideTimer) {
+    clearTimeout(statusDiffHideTimer);
+    statusDiffHideTimer = null;
+  }
+  statusDiffPopover?.classList.add('hidden');
+}
+
+function showStatusDiffPopover(anchorEl, diffText) {
+  if (!anchorEl || !diffText) return;
+  const popover = ensureStatusDiffPopover();
+  if (statusDiffHideTimer) {
+    clearTimeout(statusDiffHideTimer);
+    statusDiffHideTimer = null;
+  }
+
+  popover.innerHTML = `
+    <div class="status-diff-popover-header">Git diff preview</div>
+    <div class="status-diff-popover-body">${renderDiffPreviewHtml(diffText)}</div>
+  `;
+  popover.classList.remove('hidden');
+
+  const rect = anchorEl.getBoundingClientRect();
+  const popRect = popover.getBoundingClientRect();
+  let left = rect.right + 12;
+  if (left + popRect.width > window.innerWidth - 12) {
+    left = Math.max(12, rect.left - popRect.width - 12);
+  }
+  let top = rect.top;
+  if (top + popRect.height > window.innerHeight - 12) {
+    top = Math.max(12, window.innerHeight - popRect.height - 12);
+  }
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
 }
 
 async function refreshSessionList() {
-  allSessions = await window.api.listSessions();
+  allSessions = await window.api.listSessions({ scope: getSidebarSessionScope() });
   const validIds = new Set([...allSessions.map(s => s.id), ...terminals.keys()]);
   for (const session of allSessions) {
     if (terminals.has(session.id)) {
@@ -538,7 +1491,17 @@ async function refreshSessionList() {
   }
   await updateSessionBusyStates();
   scheduleRenderSessionList();
+  updateSessionPromptGhost(activeSessionId);
   if (!activeSessionId) emptyState.classList.remove('hidden');
+}
+
+async function getAllValidSessionIds() {
+  const sessions = await window.api.listSessions({ scope: 'all' });
+  return new Set([
+    ...sessions.map(session => session.id),
+    ...allSessions.map(session => session.id),
+    ...terminals.keys(),
+  ]);
 }
 
 const BUSY_THRESHOLD_MS = 30000;
@@ -611,7 +1574,11 @@ function patchSessionStateBadges() {
 }
 
 async function pollSessionStatus() {
-  await updateSessionBusyStates();
+  if (terminals.size > 0) {
+    await refreshSessionList();
+  } else {
+    await updateSessionBusyStates();
+  }
   patchSessionStateBadges();
 }
 
@@ -619,15 +1586,23 @@ setInterval(pollSessionStatus, STATUS_POLL_MS);
 
 let _renderScheduled = false;
 function scheduleRenderSessionList() {
+  if (isSessionListRenderLocked()) {
+    pendingSessionListRender = true;
+    return;
+  }
   if (_renderScheduled) return;
   _renderScheduled = true;
   requestAnimationFrame(() => {
     _renderScheduled = false;
+    if (isSessionListRenderLocked()) {
+      pendingSessionListRender = true;
+      return;
+    }
     renderSessionList();
   });
 }
 
-function createSessionItem(session, group) {
+function createSessionItem(session, group, index) {
   const el = document.createElement('div');
   el.className = 'session-item';
   el.dataset.sessionId = session.id;
@@ -635,7 +1610,6 @@ function createSessionItem(session, group) {
   if (sessionAliveState.has(session.id)) el.classList.add('running');
   if (group) {
     el.classList.add('grouped');
-    el.style.borderLeft = `2px solid ${group.color}`;
   }
 
   const lastUsedTime = sessionLastUsed.get(session.id);
@@ -690,6 +1664,7 @@ function createSessionItem(session, group) {
   }
 
   el.innerHTML = `
+    <div class="session-collapsed-index" title="${escapeHtml(`Session ${index + 1}`)}">${index + 1}</div>
     <div class="session-header-row">
       <div class="session-title" data-title="${escapeHtml(session.title)}">${escapeHtml(session.title)}</div>
       <span class="session-state ${stateCls}" title="${escapeHtml(stateTip)}">${stateLabel}</span>
@@ -702,6 +1677,7 @@ function createSessionItem(session, group) {
 
   el.setAttribute('tabindex', '0');
   el.setAttribute('role', 'button');
+  el.title = session.title;
 
   // Drag-and-drop + context menu for active sessions
   if (currentSidebarTab === 'active') {
@@ -746,57 +1722,66 @@ function createSessionItem(session, group) {
 }
 
 function renderSessionList() {
-  const activeIds = new Set([...terminals.keys()]);
+  if (isSessionListRenderLocked()) {
+    pendingSessionListRender = true;
+    return;
+  }
+  pendingSessionListRender = false;
+  const renderSeq = ++sessionListRenderSeq;
+  const activeIds = new Set(sessionAliveState);
 
   let displayed;
   if (currentSidebarTab === 'active') {
-    displayed = allSessions.filter(s => activeIds.has(s.id));
-    // Use manual order if available, fall back to last-used sort
-    if (sessionOrder.length > 0) {
-      const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
-      displayed.sort((a, b) => {
-        const oa = orderMap.has(a.id) ? orderMap.get(a.id) : 99999;
-        const ob = orderMap.has(b.id) ? orderMap.get(b.id) : 99999;
-        if (oa !== ob) return oa - ob;
-        return (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0);
-      });
-    } else {
-      displayed.sort((a, b) => (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0));
-    }
+    displayed = filterSessionsForSidebar({
+      sessions: allSessions,
+      activeSessionIds: activeIds,
+      currentSidebarTab
+    });
+    // Active list is ordered strictly by user placement. New live sessions are
+    // appended to sessionOrder in creation order; ended sessions are pruned.
+    ensureSessionOrder();
+    const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
+    displayed.sort((a, b) => {
+      const oa = orderMap.has(a.id) ? orderMap.get(a.id) : Number.MAX_SAFE_INTEGER;
+      const ob = orderMap.has(b.id) ? orderMap.get(b.id) : Number.MAX_SAFE_INTEGER;
+      return oa - ob;
+    });
   } else {
-    displayed = [...allSessions];
+    displayed = filterSessionsForSidebar({
+      sessions: allSessions,
+      activeSessionIds: activeIds,
+      currentSidebarTab
+    });
     displayed.sort((a, b) => (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0));
   }
 
   // Filter by search (title + tags + resources)
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
-    displayed = displayed.filter(s => {
-      if (s.title.toLowerCase().includes(q)) return true;
-      if (s.tags && s.tags.some(t => t.toLowerCase().includes(q))) return true;
-      if (s.resources && s.resources.some(r =>
-        (r.id && r.id.includes(q)) ||
-        (r.url && r.url.toLowerCase().includes(q)) ||
-        (r.name && r.name.toLowerCase().includes(q)) ||
-        (r.repo && r.repo.toLowerCase().includes(q))
-      )) return true;
-      return false;
-    });
+    displayed = displayed.filter(s => matchesSidebarMetadata(s, q));
   }
 
   sessionList.innerHTML = '';
+  appendHistoryScopeNotice();
 
   if (displayed.length === 0) {
     const emptyEl = document.createElement('div');
     emptyEl.className = 'empty-list';
-    emptyEl.textContent = currentSidebarTab === 'active'
-      ? 'No active sessions. Click a session in History or start a new one.'
-      : searchQuery ? 'No sessions match your search.' : 'No sessions found.';
+      emptyEl.textContent = currentSidebarTab === 'active'
+        ? 'No active sessions. Click a session in History or start a new one.'
+        : searchQuery ? 'No sessions match your search.' : getHistoryEmptyState(historyShowsAll);
     sessionList.appendChild(emptyEl);
     return;
   }
 
-  if (currentSidebarTab === 'active' && tabGroups.length > 0 && !searchQuery) {
+  let displayIndex = 0;
+  const appendSessionItem = (session, group = null) => {
+    const el = createSessionItem(session, group, displayIndex);
+    displayIndex += 1;
+    sessionList.appendChild(el);
+  };
+
+  if (currentSidebarTab === 'active' && tabGroups.length > 0 && !searchQuery && !sidebarCollapsed) {
     // Render grouped sessions
     const displayedIds = new Set(displayed.map(s => s.id));
 
@@ -847,33 +1832,39 @@ function renderSessionList() {
         if (draggedId) addTabToGroup(draggedId, group.id);
       });
 
-      sessionList.appendChild(headerEl);
+      const groupEl = document.createElement('div');
+      groupEl.className = 'session-group';
+      if (group.collapsed) groupEl.classList.add('collapsed');
+      groupEl.style.setProperty('--group-color', group.color);
+      groupEl.appendChild(headerEl);
 
       // Group sessions (if not collapsed)
       if (!group.collapsed) {
         for (const session of groupSessions) {
-          const el = createSessionItem(session, group);
-          sessionList.appendChild(el);
+          const el = createSessionItem(session, group, displayIndex);
+          displayIndex += 1;
+          groupEl.appendChild(el);
         }
       }
+
+      sessionList.appendChild(groupEl);
     }
 
     // Ungrouped sessions
     const groupedIds = new Set(tabGroups.flatMap(g => g.tabIds));
     const ungrouped = displayed.filter(s => !groupedIds.has(s.id));
     for (const session of ungrouped) {
-      const el = createSessionItem(session, null);
-      sessionList.appendChild(el);
+      appendSessionItem(session);
     }
   } else {
     // Original rendering (history tab or search active)
     for (const session of displayed) {
-      const el = createSessionItem(session, null);
-      sessionList.appendChild(el);
+      appendSessionItem(session);
     }
   }
 
   window.api.getNotifications().then(notifications => {
+    if (renderSeq !== sessionListRenderSeq) return;
     sessionList.querySelectorAll('.session-item').forEach(el => {
       const sessionId = el.dataset.sessionId;
       if (!sessionId) return;
@@ -883,38 +1874,69 @@ function renderSessionList() {
         badge.className = 'session-notification-badge';
         badge.textContent = unread;
         const titleEl = el.querySelector('.session-title');
-        if (titleEl) titleEl.appendChild(badge);
+        if (titleEl) {
+          titleEl.querySelector('.session-notification-badge')?.remove();
+          titleEl.appendChild(badge);
+        }
       }
     });
   });
 }
 
 function startRenameSession(sessionId, titleEl) {
+  if (activeSessionRenameId && activeSessionRenameId !== sessionId) return;
   const currentTitle = titleEl.dataset.title || titleEl.textContent;
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'session-rename-input';
   input.value = currentTitle;
+  activeSessionRenameId = sessionId;
 
   titleEl.textContent = '';
   titleEl.appendChild(input);
   input.focus();
   input.select();
 
+  let committed = false;
+  const finishRename = () => {
+    if (activeSessionRenameId === sessionId) {
+      activeSessionRenameId = null;
+    }
+    if (pendingSessionListRender) {
+      renderSessionList();
+    }
+  };
+
   const commit = async () => {
+    if (committed) return;
+    committed = true;
     const newTitle = input.value.trim();
-    if (newTitle && newTitle !== currentTitle) {
-      await window.api.renameSession(sessionId, newTitle);
-      await refreshSessionList();
-    } else {
+    try {
+      if (newTitle && newTitle !== currentTitle) {
+        await window.api.renameSession(sessionId, newTitle);
+        await refreshSessionList();
+      } else {
+        titleEl.textContent = currentTitle;
+      }
+    } finally {
+      finishRename();
+    }
+  };
+
+  const cancel = () => {
+    if (committed) return;
+    committed = true;
+    input.value = currentTitle;
+    if (titleEl.contains(input)) {
       titleEl.textContent = currentTitle;
     }
+    finishRename();
   };
 
   input.addEventListener('blur', commit);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-    if (e.key === 'Escape') { input.value = currentTitle; input.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
     e.stopPropagation();
   });
   input.addEventListener('click', (e) => e.stopPropagation());
@@ -936,17 +1958,37 @@ async function handleCwdClick(sessionId) {
     if (isAlive) {
       const entry = terminals.get(sessionId);
       if (entry) {
-        entry.terminal.write('\r\n\x1b[90m[Changing working directory…]\x1b[0m\r\n');
+        entry.terminal.write('\r\n\x1b[90m[Changing working directory…]\x1b[0m\r\n', () => {
+          scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+        });
       }
       cwdChangingSessions.add(sessionId);
       try {
         await window.api.changeCwd(sessionId, picked);
         sessionAliveState.add(sessionId);
+      } catch (error) {
+        showToast({
+          type: 'error',
+          title: 'Could not change working directory',
+          body: error?.message || picked,
+        });
+        await refreshSessionList();
+        return;
       } finally {
         cwdChangingSessions.delete(sessionId);
       }
     } else {
-      await window.api.changeCwd(sessionId, picked);
+      try {
+        await window.api.changeCwd(sessionId, picked);
+      } catch (error) {
+        showToast({
+          type: 'error',
+          title: 'Could not change working directory',
+          body: error?.message || picked,
+        });
+        await refreshSessionList();
+        return;
+      }
     }
 
     // Update local state
@@ -980,7 +2022,7 @@ function confirmDeleteSession(sessionId, title) {
     cleanup();
     // Close tab if open
     if (terminals.has(sessionId)) {
-      await closeTab(sessionId);
+      await terminateSession(sessionId);
     }
     await window.api.deleteSession(sessionId);
     await refreshSessionList();
@@ -994,6 +2036,10 @@ function confirmDeleteSession(sessionId, title) {
 async function openSession(sessionId) {
   const existing = terminals.get(sessionId);
   if (existing && !existing.exited) {
+    if (!openTabIds.has(sessionId)) {
+      const session = allSessions.find(s => s.id === sessionId);
+      addTab(sessionId, session?.title || sessionId.substring(0, 8));
+    }
     switchToSession(sessionId);
     await new Promise(resolve => requestAnimationFrame(resolve));
     return;
@@ -1005,6 +2051,7 @@ async function openSession(sessionId) {
     existing.terminal.dispose();
     existing.wrapper.remove();
     terminals.delete(sessionId);
+    openTabIds.delete(sessionId);
     const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
     if (tab) tab.remove();
   }
@@ -1017,18 +2064,12 @@ async function openSession(sessionId) {
     createTerminal(sessionId);
     switchToSession(sessionId);
 
-    const session = allSessions.find(s => s.id === sessionId);
+    const session = ensureSessionPlaceholder(sessionId);
     addTab(sessionId, session?.title || sessionId.substring(0, 8));
     renderSessionList();
     saveTabState();
     // Wait for rAF focus to complete
     await new Promise(resolve => requestAnimationFrame(resolve));
-  } catch (error) {
-    showToast({
-      type: 'error',
-      title: 'Failed to open session',
-      body: error?.message || 'DeepSky could not restore this session.',
-    });
   } finally {
     openingSession.delete(sessionId);
   }
@@ -1036,15 +2077,24 @@ async function openSession(sessionId) {
 
 async function newSession() {
   if (creatingSession) return;
+
+  const settings = await window.api.getSettings();
+  applySettingsToControls(settings);
+
+  const availability = getNewSessionAvailability(settings);
+  if (!availability.available) {
+    showToast({ type: 'error', title: 'New session unavailable', body: availability.reason });
+    return;
+  }
+
   creatingSession = true;
 
   try {
     // Prompt for working directory if enabled
     let cwd = undefined;
-    const settings = await window.api.getSettings();
     if (settings.promptForWorkdir) {
       const picked = await window.api.pickDirectory(settings.defaultWorkdir || undefined);
-      if (picked === null) { creatingSession = false; return; } // user cancelled
+      if (picked === null) return;
       cwd = picked;
     } else if (settings.defaultWorkdir) {
       cwd = settings.defaultWorkdir;
@@ -1057,9 +2107,7 @@ async function newSession() {
     addTab(sessionId, 'New Session');
 
     // Inject placeholder so the active list renders immediately
-    if (!allSessions.find(s => s.id === sessionId)) {
-      allSessions.unshift({ id: sessionId, title: 'New Session', cwd: cwd || '', updatedAt: new Date().toISOString(), tags: [], resources: [] });
-    }
+    ensureSessionPlaceholder(sessionId, { title: 'New Session', cwd: cwd || '' });
 
     currentSidebarTab = 'active';
     document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'active'));
@@ -1082,12 +2130,8 @@ async function newSession() {
     const termEntry = terminals.get(sessionId);
     if (termEntry) termEntry.titlePoll = titlePoll;
     saveTabState();
-  } catch (error) {
-    showToast({
-      type: 'error',
-      title: 'Failed to create session',
-      body: error?.message || 'DeepSky could not start a new session.',
-    });
+  } catch (err) {
+    showToast({ type: 'error', title: 'Could not start new session', body: String(err?.message || err) });
   } finally {
     creatingSession = false;
   }
@@ -1108,7 +2152,16 @@ function createTerminal(sessionId) {
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new WebLinksAddon((e, uri) => window.api.openExternal(uri)));
+  // IMPORTANT — DO NOT reintroduce a real handler here.
+  //
+  // The embedded Copilot CLI emits OSC 8 hyperlinks and opens links itself when
+  // the user clicks/Ctrl-clicks them. If we also pass `(e, uri) => window.api.openExternal(uri)`
+  // (or any non-empty handler), every link opens TWICE — once by the CLI, once by us.
+  //
+  // WebLinksAddon must still be loaded so URLs are visually decorated and the cursor
+  // becomes a pointer on hover. With a no-op callback, the addon provides only the
+  // hover affordance and the CLI remains the sole opener.
+  terminal.loadAddon(new WebLinksAddon(() => {}));
 
   const wrapper = document.createElement('div');
   wrapper.className = 'terminal-wrapper';
@@ -1118,8 +2171,19 @@ function createTerminal(sessionId) {
   terminal.open(wrapper);
   fitAddon.fit();
 
-  terminal.onData((data) => window.api.writePty(sessionId, data));
-  terminal.onResize(({ cols, rows }) => window.api.resizePty(sessionId, cols, rows));
+  terminal.onData((data) => {
+    handleSessionPromptInput(sessionId, data);
+    window.api.writePty(sessionId, data);
+  });
+  terminal.onResize(({ cols, rows }) => {
+    window.api.resizePty(sessionId, cols, rows);
+    scheduleTerminalViewportSync(sessionId, { refreshSearch: true });
+  });
+  terminal.onScroll(() => {
+    const currentEntry = terminals.get(sessionId);
+    if (!currentEntry || currentEntry.isSyncingViewport) return;
+    scheduleTerminalViewportSync(sessionId);
+  });
 
   // Defense-in-depth: suppress xterm's native paste handler.
   // Primary fix is in main.js (custom menu without 'paste' role), but this
@@ -1133,9 +2197,19 @@ function createTerminal(sessionId) {
 
   // Intercept terminal shortcuts via the shared helper so local behavior layers on
   // top of main's current shortcut plumbing instead of replacing it.
-  terminal.attachCustomKeyEventHandler(createTerminalKeyHandler(sessionId, terminal, window.api));
+  terminal.attachCustomKeyEventHandler(createTerminalKeyHandler(sessionId, terminal, window.api, {
+    onInput: (data) => handleSessionPromptInput(sessionId, data)
+  }));
 
-  terminals.set(sessionId, { terminal, fitAddon, wrapper });
+  terminals.set(sessionId, {
+    terminal,
+    fitAddon,
+    wrapper,
+    isSyncingViewport: false,
+    pendingViewportRefreshSearch: false
+  });
+  scheduleTerminalViewportSync(sessionId);
+  scheduleSessionPromptGhostRefresh(sessionId, [0, 400]);
 }
 
 function switchToSession(sessionId) {
@@ -1143,6 +2217,7 @@ function switchToSession(sessionId) {
 
   if (activeSessionId && terminals.has(activeSessionId)) {
     terminals.get(activeSessionId).wrapper.classList.remove('visible');
+    updateSessionPromptGhost(activeSessionId);
   }
 
   activeSessionId = sessionId;
@@ -1152,11 +2227,14 @@ function switchToSession(sessionId) {
   if (currentSidebarTab !== 'active') {
     currentSidebarTab = 'active';
     document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'active'));
+    void refreshSessionList();
   }
 
   const entry = terminals.get(sessionId);
   if (entry) {
     entry.wrapper.classList.add('visible');
+    updateSessionPromptGhost(sessionId);
+    scheduleSessionPromptGhostRefresh(sessionId);
     emptyState.classList.add('hidden');
     const currentId = sessionId;
     requestAnimationFrame(() => {
@@ -1164,7 +2242,9 @@ function switchToSession(sessionId) {
       entry.fitAddon.fit();
       entry.terminal.focus();
       window.api.resizePty(currentId, entry.terminal.cols, entry.terminal.rows);
-      entry.terminal._core?.viewport?.syncScrollArea(true);
+      syncTerminalViewport(currentId);
+      scheduleTerminalViewportSync(currentId, { refreshSearch: true });
+      if (!sessionSearch.classList.contains('hidden')) refreshSessionSearch(true);
     });
   }
 
@@ -1192,8 +2272,11 @@ function patchActiveHighlight() {
 function showHome() {
   if (activeSessionId && terminals.has(activeSessionId)) {
     terminals.get(activeSessionId).wrapper.classList.remove('visible');
+    updateSessionPromptGhost(activeSessionId);
   }
+  closeSessionSearch({ restoreTerminalFocus: false });
   activeSessionId = null;
+  updateSessionPromptGhost(null);
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   emptyState.classList.remove('hidden');
   updateStatusPanel(null);
@@ -1201,6 +2284,7 @@ function showHome() {
 
 function addTab(sessionId, title) {
   if (document.querySelector(`.tab[data-session-id="${sessionId}"]`)) return;
+  openTabIds.add(sessionId);
 
   const tab = document.createElement('div');
   tab.className = 'tab active';
@@ -1249,11 +2333,44 @@ function updateTabScrollButtons() {
   tabScrollRight.classList.toggle('visible', overflows && el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
 }
 
-async function closeTab(sessionId) {
-  await window.api.killSession(sessionId);
+function removeTabUi(sessionId) {
+  openTabIds.delete(sessionId);
+  const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
+  if (tab) tab.remove();
+  updateTabScrollButtons();
+}
 
+async function closeTab(sessionId, { remember = true } = {}) {
   // Remember for Ctrl+Shift+T restore
-  recentlyClosedSessions.push(sessionId);
+  if (remember) rememberRestorableClosedSession(recentlyClosedSessions, sessionId);
+  removeTabUi(sessionId);
+
+  if (activeSessionId === sessionId) {
+    const entry = terminals.get(sessionId);
+    if (entry) entry.wrapper.classList.remove('visible');
+    activeSessionId = null;
+    updateSessionPromptGhost(null);
+    const remainingTabs = [...document.querySelectorAll('.tab')];
+    if (remainingTabs.length > 0) {
+      switchToSession(remainingTabs[remainingTabs.length - 1].dataset.sessionId);
+    } else {
+      closeSessionSearch({ restoreTerminalFocus: false });
+      emptyState.classList.remove('hidden');
+      updateStatusPanel(null);
+    }
+  }
+
+  renderSessionList();
+  saveTabState();
+}
+
+async function terminateSession(sessionId, { rememberClosedTab = false } = {}) {
+  if (rememberClosedTab && openTabIds.has(sessionId)) {
+    ensureSessionPlaceholder(sessionId);
+    rememberRestorableClosedSession(recentlyClosedSessions, sessionId);
+  }
+
+  await window.api.killSession(sessionId);
 
   const entry = terminals.get(sessionId);
   if (entry) {
@@ -1263,34 +2380,22 @@ async function closeTab(sessionId) {
     entry.wrapper.remove();
     terminals.delete(sessionId);
   }
+
+  removeTabUi(sessionId);
+  tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
   sessionAliveState.delete(sessionId);
   sessionBusyState.delete(sessionId);
   sessionIdleCount.delete(sessionId);
-  sessionLastUsed.delete(sessionId);
   cwdChangingSessions.delete(sessionId);
-
-  // Remove from any tab group
-  for (const group of tabGroups) {
-    const idx = group.tabIds.indexOf(sessionId);
-    if (idx !== -1) {
-      group.tabIds.splice(idx, 1);
-      if (group.tabIds.length === 0) {
-        tabGroups = tabGroups.filter(g => g.id !== group.id);
-      }
-      break;
-    }
-  }
-
-  const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
-  if (tab) tab.remove();
-  updateTabScrollButtons();
 
   if (activeSessionId === sessionId) {
     activeSessionId = null;
-    const remainingTabs = document.querySelectorAll('.tab');
+    updateSessionPromptGhost(null);
+    const remainingTabs = [...document.querySelectorAll('.tab')];
     if (remainingTabs.length > 0) {
       switchToSession(remainingTabs[remainingTabs.length - 1].dataset.sessionId);
     } else {
+      closeSessionSearch({ restoreTerminalFocus: false });
       emptyState.classList.remove('hidden');
       updateStatusPanel(null);
     }
@@ -1304,12 +2409,13 @@ function updateTabStatus(sessionId, alive) {
   const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
   if (tab) tab.style.opacity = alive ? '1' : '0.5';
 }
-
+
+
 // ───────────── Session Reordering ─────────────
 
 function ensureSessionOrder() {
   // Build sessionOrder from current active sessions if it's empty or stale
-  const activeIds = new Set([...terminals.keys()]);
+  const activeIds = new Set(sessionAliveState);
   // Add any active sessions not yet in sessionOrder
   for (const id of activeIds) {
     if (!sessionOrder.includes(id)) sessionOrder.push(id);
@@ -1415,16 +2521,7 @@ function addTabToGroup(sessionId, groupId) {
 }
 
 function removeTabFromGroup(sessionId) {
-  for (const g of tabGroups) {
-    const idx = g.tabIds.indexOf(sessionId);
-    if (idx !== -1) {
-      g.tabIds.splice(idx, 1);
-      if (g.tabIds.length === 0) {
-        tabGroups = tabGroups.filter(grp => grp.id !== g.id);
-      }
-      break;
-    }
-  }
+  tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
   renderSessionList();
   saveTabState();
 }
@@ -1549,6 +2646,14 @@ function showSessionContextMenu(e, sessionId) {
   const items = [];
 
   items.push({
+    label: 'Rename',
+    action: () => {
+      const el = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"] .session-title`);
+      if (el) startRenameSession(sessionId, el);
+    },
+  });
+
+  items.push({
     label: 'Add to new group',
     action: () => {
       if (group) removeTabFromGroupSilent(sessionId);
@@ -1579,9 +2684,11 @@ function showSessionContextMenu(e, sessionId) {
 }
 
 function startGroupRename(group) {
+  if (activeSessionRenameId || (activeGroupRenameId && activeGroupRenameId !== group.id)) return;
   const header = sessionList.querySelector(`.session-group-header[data-group-id="${group.id}"]`);
   if (!header) return;
   const nameSpan = header.querySelector('.session-group-name');
+  activeGroupRenameId = group.id;
   nameSpan.setAttribute('contenteditable', 'true');
   nameSpan.focus();
   const range = document.createRange();
@@ -1591,6 +2698,9 @@ function startGroupRename(group) {
   sel.addRange(range);
 
   const finishRename = () => {
+    if (activeGroupRenameId === group.id) {
+      activeGroupRenameId = null;
+    }
     nameSpan.setAttribute('contenteditable', 'false');
     let newName = nameSpan.textContent.trim().substring(0, 50);
     if (newName) group.name = newName;
@@ -1641,16 +2751,7 @@ function showGroupContextMenu(e, groupId) {
 }
 
 function removeTabFromGroupSilent(sessionId) {
-  for (const g of tabGroups) {
-    const idx = g.tabIds.indexOf(sessionId);
-    if (idx !== -1) {
-      g.tabIds.splice(idx, 1);
-      if (g.tabIds.length === 0) {
-        tabGroups = tabGroups.filter(grp => grp.id !== g.id);
-      }
-      break;
-    }
-  }
+  tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
 }
 
 // Status panel
@@ -1659,12 +2760,16 @@ function toggleStatusPanel() {
   btnToggleStatus.classList.toggle('active', !collapsed);
   if (!collapsed && activeSessionId) updateStatusPanel(activeSessionId);
   // Refit terminal once the CSS width transition actually finishes
+  let fitted = false;
   statusPanel.addEventListener('transitionend', function onEnd(e) {
     if (e.propertyName === 'width') {
       statusPanel.removeEventListener('transitionend', onEnd);
+      fitted = true;
       fitActiveTerminal();
     }
   });
+  // Fallback if transitionend doesn't fire (e.g. transition disabled or instant)
+  setTimeout(() => { if (!fitted) fitActiveTerminal(); }, 350);
 }
 
 // Section expand/collapse state
@@ -1673,10 +2778,12 @@ let statusSectionState = {};
 function loadStatusSectionState() {
   try {
     const settings = window._cachedSettings || {};
+    const savedSections = settings.statusPanelSections || {};
     statusSectionState = settings.statusPanelSections || {
       summary: true, nextSteps: false, prs: false, workitems: false,
-      files: false, pipelines: false, timeline: false
+      files: false, generatedFiles: false, pipelines: false, timeline: false
     };
+    statusSectionState.generatedFiles = savedSections.generatedFiles ?? savedSections.reportsGenerated ?? statusSectionState.generatedFiles;
   } catch { /* defaults above */ }
 }
 
@@ -1687,6 +2794,7 @@ function saveStatusSectionState() {
 function toggleStatusSection(sectionKey, el) {
   const expanded = el.classList.toggle('expanded');
   statusSectionState[sectionKey] = expanded;
+  el.querySelector('.status-section-header')?.setAttribute('aria-expanded', String(expanded));
   saveStatusSectionState();
 }
 
@@ -1694,12 +2802,12 @@ function renderStatusSection(key, icon, title, badge, contentHtml) {
   if (!contentHtml) return '';
   const expanded = statusSectionState[key] ? 'expanded' : '';
   return `<div class="status-section ${expanded}" data-section="${key}">
-    <div class="status-section-header">
+    <button class="status-section-header" type="button" aria-expanded="${statusSectionState[key] ? 'true' : 'false'}">
       <span class="status-section-icon">${icon}</span>
       <span class="status-section-title">${escapeHtml(title)}</span>
       ${badge ? `<span class="status-section-badge">${escapeHtml(String(badge))}</span>` : ''}
       <span class="status-section-chevron">▶</span>
-    </div>
+    </button>
     <div class="status-section-content">${contentHtml}</div>
   </div>
   <div class="status-divider"></div>`;
@@ -1747,10 +2855,12 @@ function renderResourceItems(resources) {
 }
 
 async function updateStatusPanel(sessionId) {
+  const requestId = ++statusPanelRequestSeq;
   if (statusPanel.classList.contains('collapsed')) return;
   loadStatusSectionState();
 
   if (!sessionId) {
+    hideStatusDiffPopover();
     statusPanelBody.innerHTML = '<div class="status-empty">Open a session to see its status</div>';
     return;
   }
@@ -1760,9 +2870,18 @@ async function updateStatusPanel(sessionId) {
     window.api.getSessionStatus(sessionId).catch(() => null),
     Promise.resolve(allSessions.find(s => s.id === sessionId)),
   ]);
+  if (!shouldApplyStatusPanelUpdate({
+    requestId,
+    currentRequestId: statusPanelRequestSeq,
+    requestedSessionId: sessionId,
+    activeSessionId,
+    panelCollapsed: statusPanel.classList.contains('collapsed'),
+  })) {
+    return;
+  }
 
   const resources = session?.resources || [];
-  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], timeline: [] };
+  const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], generatedFiles: [], timeline: [] };
 
   let html = '';
 
@@ -1775,10 +2894,15 @@ async function updateStatusPanel(sessionId) {
   }
 
   // Summary section
-  if (status.summary) {
-    const summaryContent = `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`;
-    html += renderStatusSection('summary', '📝', 'Summary', null, summaryContent);
-  }
+  const summaryText = status.summary?.text
+    ? `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`
+    : '<div class="status-summary-empty">No summary yet for this session.</div>';
+  const directoryAvailability = await window.api.getSessionDirectoryAvailability(sessionId).catch(() => ({
+    sessionDirectoryAvailable: false,
+    filesDirectoryAvailable: false,
+  }));
+  const summaryMeta = renderStatusSummaryMetaHtml(sessionId, directoryAvailability);
+  html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
 
   // Next steps
   if (status.nextSteps.length > 0) {
@@ -1813,13 +2937,32 @@ async function updateStatusPanel(sessionId) {
   // Files changed
   if (status.files.length > 0) {
     const filesHtml = status.files.map(f => {
-      const badgeCls = f.action === 'A' ? 'status-file-added' : 'status-file-modified';
-      return `<div class="status-file-item">
+      const badgeCls =
+        f.action === 'A' ? 'status-file-added' :
+        f.action === 'D' ? 'status-file-deleted' :
+        f.action === 'R' ? 'status-file-renamed' :
+        'status-file-modified';
+      const diffData = f.diff ? ` data-diff="${escapeHtml(encodeURIComponent(f.diff))}"` : '';
+      return `<div class="status-file-item${f.diff ? ' status-file-item-hoverable' : ''}"${diffData}>
         <span class="status-file-badge ${badgeCls}">${f.action}</span>
         <span class="status-file-path">${escapeHtml(f.path)}</span>
       </div>`;
     }).join('');
     html += renderStatusSection('files', '📂', 'Files Changed', status.files.length, filesHtml);
+  }
+
+  if (status.generatedFiles.length > 0) {
+    const generatedFilesHtml = status.generatedFiles.map((file) => {
+      const badge = file.ext ? file.ext.toUpperCase().slice(0, 5) : 'FILE';
+      return `<div class="status-generated-file-item" data-session-id="${escapeHtml(sessionId)}" data-relative-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">
+        <span class="status-generated-file-badge">${escapeHtml(badge)}</span>
+        <div class="status-generated-file-details">
+          <div class="status-generated-file-name">${escapeHtml(file.name)}</div>
+          <div class="status-generated-file-path">${escapeHtml(file.path)}</div>
+        </div>
+      </div>`;
+    }).join('');
+    html += renderStatusSection('generatedFiles', '📄', 'Reports Generated', status.generatedFiles.length, generatedFilesHtml);
   }
 
   // Pipelines, releases, repos, wikis, links
@@ -1851,6 +2994,7 @@ async function updateStatusPanel(sessionId) {
     html = '<div class="status-empty">No status data yet for this session</div>';
   }
 
+  hideStatusDiffPopover();
   statusPanelBody.innerHTML = html;
 
   // Wire section expand/collapse
@@ -1869,6 +3013,23 @@ async function updateStatusPanel(sessionId) {
       if (url && url !== '#') window.api.openExternal(url);
     });
   });
+
+  statusPanelBody.querySelectorAll('.status-generated-file-item').forEach(item => {
+    item.addEventListener('click', async () => {
+      const targetSessionId = item.dataset.sessionId;
+      const relativePath = item.dataset.relativePath;
+      if (!targetSessionId || !relativePath) return;
+
+      const result = await window.api.openGeneratedFile(targetSessionId, relativePath);
+      if (!result?.ok) {
+        showToast({
+          type: 'error',
+          title: 'Could not open generated file',
+          body: result?.error || relativePath,
+        });
+      }
+    });
+  });
 }
 
 function fitActiveTerminal() {
@@ -1877,13 +3038,14 @@ function fitActiveTerminal() {
     entry.fitAddon.fit();
     window.api.resizePty(activeSessionId, entry.terminal.cols, entry.terminal.rows);
     // Force viewport scroll area sync even when fit() is a no-op (same cols/rows).
-    entry.terminal._core?.viewport?.syncScrollArea(true);
+    syncTerminalViewport(activeSessionId);
     // Reset any horizontal scroll offset that xterm's viewport may have retained
     // from a wider column count (e.g. when status panel opens and narrows the container).
     const viewport = entry.terminal.element?.querySelector('.xterm-viewport');
     if (viewport) viewport.scrollLeft = 0;
     const screen = entry.terminal.element?.querySelector('.xterm-screen');
     if (screen) screen.style.width = '';
+    scheduleTerminalViewportSync(activeSessionId, { refreshSearch: true });
   }
 }
 
@@ -1897,6 +3059,10 @@ async function showInstructions() {
 
   instructionsPanel.classList.remove('hidden');
   terminalArea.style.display = 'none';
+
+  if (typeof refreshReviewButton === 'function') {
+    refreshReviewButton().catch(err => console.warn('refreshReviewButton failed:', err));
+  }
 }
 
 function renderMarkdown(md, changedLineNumbers) {
@@ -2128,6 +3294,428 @@ document.getElementById('btn-import-instructions').addEventListener('click', () 
   showImportMenu();
 });
 
+// ===== Enhance Instructions =====
+let lastEnhanceBackup = null;
+let enhancementInFlight = false;
+
+const enhanceConfirmModal = document.getElementById('enhance-confirm-modal');
+const reviewModal = document.getElementById('review-modal');
+const reviewIframe = document.getElementById('review-modal-iframe');
+const reviewTimestampLabel = document.getElementById('review-modal-timestamp');
+const btnEnhance = document.getElementById('btn-enhance-instructions');
+const btnReview = document.getElementById('btn-review-enhancement');
+const enhanceConfirmContent = enhanceConfirmModal.querySelector('.enhance-modal-content');
+const reviewModalContent = reviewModal.querySelector('.review-modal-content');
+
+async function refreshReviewButton() {
+  try {
+    const backups = await window.api.enhanceListBackups();
+    // Prefer a pending proposal (has changes.html, not yet applied) over an already-applied one.
+    // If none pending, fall back to the most recent applied backup so the user can still rollback.
+    const pending = backups.find(b => b.hasChangesHtml && !b.applied);
+    const applied = backups.find(b => b.applied);
+    const target = pending || applied || null;
+
+    if (target) {
+      lastEnhanceBackup = target;
+      btnReview.classList.remove('hidden');
+      btnReview.title = pending
+        ? `Review proposed enhancement from ${target.timestamp}`
+        : `Review or roll back applied enhancement from ${target.timestamp}`;
+    } else {
+      lastEnhanceBackup = null;
+      btnReview.classList.add('hidden');
+    }
+  } catch (err) {
+    console.warn('Failed to list enhancement backups:', err);
+  }
+}
+
+function openEnhanceConfirm() {
+  enhanceConfirmModal.classList.remove('hidden');
+  // Focus the safe (cancel) button by default
+  setTimeout(() => document.getElementById('btn-enhance-cancel')?.focus(), 0);
+}
+function closeEnhanceConfirm() {
+  enhanceConfirmModal.classList.add('hidden');
+  if (!enhancementInFlight) btnEnhance.focus();
+}
+
+async function startEnhancement() {
+  if (enhancementInFlight) return;
+  enhancementInFlight = true;
+  closeEnhanceConfirm();
+  btnEnhance.disabled = true;
+
+  hideInstructions();
+  try {
+    // SINGLE atomic IPC: backup + write prompt file + spawn new session with
+    // the prompt baked into the CLI args via `-i`. Both Copilot CLI and
+    // `agency copilot` execute it on startup — no PTY-write timing involved.
+    const { sessionId, backup } = await window.api.enhanceStartSession();
+
+    showToast({
+      type: 'success',
+      title: backup.reused ? 'Reusing existing backup' : 'Backup created',
+      body: backup.reused
+        ? `No changes since ${backup.timestamp} — using that snapshot.`
+        : `Saved ${backup.fileCount} file(s) to ${backup.timestamp}`,
+    });
+
+    sessionAliveState.add(sessionId);
+    createTerminal(sessionId);
+    switchToSession(sessionId);
+    addTab(sessionId, 'Enhance Instructions');
+
+    if (!allSessions.find(s => s.id === sessionId)) {
+      allSessions.unshift({
+        id: sessionId,
+        title: 'Enhance Instructions',
+        cwd: '',
+        updatedAt: new Date().toISOString(),
+        tags: [],
+        resources: [],
+      });
+    }
+    currentSidebarTab = 'active';
+    document.querySelectorAll('.sidebar-tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.tab === 'active')
+    );
+    renderSessionList();
+    saveTabState();
+
+    showToast({
+      type: 'info',
+      title: 'Enhancement session started',
+      body: 'When it finishes, click Review on the Instructions panel.',
+    });
+  } catch (err) {
+    showToast({ type: 'error', title: 'Enhancement failed to start', body: String(err.message || err) });
+  } finally {
+    enhancementInFlight = false;
+    btnEnhance.disabled = false;
+  }
+}
+
+async function openReviewModal() {
+  if (!lastEnhanceBackup) {
+    await refreshReviewButton();
+    if (!lastEnhanceBackup) {
+      showToast({ type: 'info', title: 'No enhancement found', body: 'Run Enhance to generate one.' });
+      return;
+    }
+  }
+  let html;
+  try {
+    html = await window.api.enhanceGetBackupHtml(lastEnhanceBackup.timestamp);
+  } catch (err) {
+    showToast({ type: 'error', title: 'Failed to load report', body: String(err.message || err) });
+    return;
+  }
+  if (!html) {
+    showToast({ type: 'info', title: 'Report not ready yet', body: 'The enhancement session has not produced changes.html.' });
+    return;
+  }
+  reviewIframe.srcdoc = decorateReportHtml(html);
+  reviewTimestampLabel.textContent = lastEnhanceBackup.timestamp;
+  updateReviewModalActions();
+  reviewModal.classList.remove('hidden');
+  setTimeout(() => document.getElementById('btn-review-close')?.focus(), 0);
+}
+
+// Inject theme + diff-coloring overrides into the agent's report HTML so it
+// renders consistently in the iframe regardless of how the agent styled it.
+// We inject the override stylesheet at end-of-body to win cascade order, and
+// match the same specificity (html[data-theme="..."]) the report templates use.
+// We also run a JS pass that auto-colors unified-diff lines inside <pre> blocks
+// — older reports emit raw text diffs without semantic <ins>/<del> markup.
+function decorateReportHtml(html) {
+  const isDark = currentTheme !== 'latte';
+  const dataTheme = isDark ? 'dark' : 'light';
+  const palette = isDark
+    ? {
+        bg: '#1e1e2e', bgElev: '#181825', surface: '#313244', surfaceSoft: '#45475a',
+        text: '#cdd6f4', muted: '#a6adc8', soft: '#bac2de',
+        border: '#45475a', borderStrong: '#585b70', accent: '#cba6f7', accentSoft: 'rgba(203,166,247,0.14)',
+        link: '#89b4fa',
+        addBg: 'rgba(166, 227, 161, 0.18)', addFg: '#a6e3a1', addBorder: '#a6e3a1',
+        delBg: 'rgba(243, 139, 168, 0.18)', delFg: '#f38ba8', delBorder: '#f38ba8',
+        ctxFg: '#a6adc8',
+      }
+    : {
+        bg: '#eff1f5', bgElev: '#e6e9ef', surface: '#ccd0da', surfaceSoft: '#dce0e8',
+        text: '#4c4f69', muted: '#6c6f85', soft: '#5c5f77',
+        border: '#bcc0cc', borderStrong: '#acb0be', accent: '#8839ef', accentSoft: 'rgba(136,57,239,0.14)',
+        link: '#1e66f5',
+        addBg: 'rgba(64, 160, 43, 0.18)', addFg: '#40a02b', addBorder: '#40a02b',
+        delBg: 'rgba(210, 15, 57, 0.18)', delFg: '#d20f39', delBorder: '#d20f39',
+        ctxFg: '#6c6f85',
+      };
+  const overrideStyle = `<style id="deepsky-report-overrides">
+    html[data-theme="${dataTheme}"], html[data-theme="dark"], html[data-theme="light"], :root {
+      color-scheme: ${dataTheme} !important;
+      --cp-bg: ${palette.bg} !important;
+      --cp-bg-elevated: ${palette.bgElev} !important;
+      --cp-surface: ${palette.surface} !important;
+      --cp-surface-soft: ${palette.surfaceSoft} !important;
+      --cp-border: ${palette.border} !important;
+      --cp-border-strong: ${palette.borderStrong} !important;
+      --cp-text: ${palette.text} !important;
+      --cp-text-muted: ${palette.muted} !important;
+      --cp-text-soft: ${palette.soft} !important;
+      --cp-accent: ${palette.accent} !important;
+      --cp-accent-hover: ${palette.accent} !important;
+      --cp-accent-soft: ${palette.accentSoft} !important;
+      --cp-link: ${palette.link} !important;
+      --cp-panel: ${palette.surface} !important;
+      --cp-panel-strong: ${palette.surface} !important;
+    }
+    html, body { background: ${palette.bg} !important; color: ${palette.text} !important; }
+    /* Semantic diff markup */
+    ins, .diff-add, .diff-line.added, .diff-add-line, .added {
+      background: ${palette.addBg} !important;
+      color: ${palette.addFg} !important;
+      text-decoration: none !important;
+    }
+    del, .diff-remove, .diff-line.removed, .diff-del-line, .removed {
+      background: ${palette.delBg} !important;
+      color: ${palette.delFg} !important;
+      text-decoration: none !important;
+    }
+    /* Block-level diff lines DeepSky auto-wraps in <pre> blocks */
+    .deepsky-diff-add {
+      display: block;
+      background: ${palette.addBg};
+      color: ${palette.addFg};
+      border-left: 3px solid ${palette.addBorder};
+      padding: 1px 8px;
+      margin: 0 -8px;
+    }
+    .deepsky-diff-del {
+      display: block;
+      background: ${palette.delBg};
+      color: ${palette.delFg};
+      border-left: 3px solid ${palette.delBorder};
+      padding: 1px 8px;
+      margin: 0 -8px;
+    }
+    .deepsky-diff-ctx {
+      display: block;
+      color: ${palette.ctxFg};
+      padding: 1px 8px;
+      margin: 0 -8px;
+    }
+  </style>
+  <script>
+    (function(){
+      try { document.documentElement.setAttribute('data-theme', '${dataTheme}'); } catch(_) {}
+      // Remove any prefers-color-scheme based theme inversions the report tried to apply
+      try {
+        var mo = new MutationObserver(function(){
+          if (document.documentElement.getAttribute('data-theme') !== '${dataTheme}') {
+            document.documentElement.setAttribute('data-theme', '${dataTheme}');
+          }
+        });
+        mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      } catch(_) {}
+      // Auto-color unified-diff lines (+/-) inside <pre> blocks for reports
+      // that emitted raw text diffs without semantic markup.
+      function decorateDiffs() {
+        document.querySelectorAll('pre').forEach(function(pre){
+          if (pre.dataset.deepskyDecorated) return;
+          var raw = pre.textContent || '';
+          var lines = raw.split('\\n');
+          // Heuristic: only treat as diff if at least 2 lines start with + or - (and not ++ or -- which are headers)
+          var diffLineCount = 0;
+          for (var i = 0; i < lines.length; i++) {
+            var l = lines[i];
+            if ((l[0] === '+' || l[0] === '-') && l[1] !== l[0]) diffLineCount++;
+          }
+          if (diffLineCount < 2) return;
+          var frag = document.createDocumentFragment();
+          for (var j = 0; j < lines.length; j++) {
+            var line = lines[j];
+            var span = document.createElement('span');
+            if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) {
+              span.className = 'deepsky-diff-ctx';
+              span.style.fontWeight = '600';
+            } else if (line[0] === '+') {
+              span.className = 'deepsky-diff-add';
+            } else if (line[0] === '-') {
+              span.className = 'deepsky-diff-del';
+            } else {
+              span.className = 'deepsky-diff-ctx';
+            }
+            span.textContent = line + (j < lines.length - 1 ? '\\n' : '');
+            frag.appendChild(span);
+          }
+          pre.textContent = '';
+          pre.appendChild(frag);
+          pre.dataset.deepskyDecorated = '1';
+        });
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', decorateDiffs);
+      } else {
+        decorateDiffs();
+      }
+    })();
+  </script>`;
+  // Inject at END of body so we win cascade order against the report's own CSS.
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, overrideStyle + '</body>');
+  }
+  // No </body>? Append.
+  return html + overrideStyle;
+}
+
+function updateReviewModalActions() {
+  const btnApply = document.getElementById('btn-review-apply');
+  const btnDiscard = document.getElementById('btn-review-discard');
+  const btnRollback = document.getElementById('btn-review-rollback');
+  if (!lastEnhanceBackup) {
+    btnApply.classList.add('hidden');
+    btnDiscard.classList.add('hidden');
+    btnRollback.classList.add('hidden');
+    return;
+  }
+  const pending = lastEnhanceBackup.hasProposed && !lastEnhanceBackup.applied;
+  btnApply.classList.toggle('hidden', !pending);
+  btnDiscard.classList.toggle('hidden', !pending);
+  btnRollback.classList.toggle('hidden', !lastEnhanceBackup.applied);
+}
+
+function focusReviewTrigger() {
+  if (!btnReview.classList.contains('hidden')) {
+    btnReview.focus();
+    return;
+  }
+  btnEnhance.focus();
+}
+
+function focusReviewModalAction() {
+  const focusTarget = [
+    document.getElementById('btn-review-apply'),
+    document.getElementById('btn-review-discard'),
+    document.getElementById('btn-review-rollback'),
+    document.getElementById('btn-review-close'),
+  ].find((button) => button && !button.classList.contains('hidden') && !button.disabled);
+
+  focusTarget?.focus();
+}
+
+function closeReviewModal({ restoreFocus = true } = {}) {
+  reviewModal.classList.add('hidden');
+  reviewIframe.removeAttribute('srcdoc');
+  if (restoreFocus) focusReviewTrigger();
+}
+
+async function applyEnhancement() {
+  if (!lastEnhanceBackup) return;
+  try {
+    const result = await window.api.enhanceApply(lastEnhanceBackup.timestamp);
+    showToast({
+      type: 'success',
+      title: 'Enhancement applied',
+      body: `${result.applied.length} change(s) applied. Roll back from the same Review button if needed.`,
+    });
+    closeReviewModal({ restoreFocus: false });
+    await refreshReviewButton();
+    focusReviewTrigger();
+    if (!instructionsPanel.classList.contains('hidden')) {
+      await showInstructions();
+    }
+  } catch (err) {
+    showToast({ type: 'error', title: 'Apply failed', body: String(err.message || err) });
+    await refreshReviewButton();
+    updateReviewModalActions();
+    focusReviewModalAction();
+  }
+}
+
+async function discardEnhancement() {
+  if (!lastEnhanceBackup) return;
+  const ok = confirm(`Discard the proposed changes from ${lastEnhanceBackup.timestamp}? Your current instructions are not modified.`);
+  if (!ok) return;
+  try {
+    await window.api.enhanceDiscard(lastEnhanceBackup.timestamp);
+    showToast({ type: 'info', title: 'Proposal discarded', body: 'Your current instructions remain unchanged.' });
+    closeReviewModal({ restoreFocus: false });
+    await refreshReviewButton();
+    focusReviewTrigger();
+  } catch (err) {
+    showToast({ type: 'error', title: 'Discard failed', body: String(err.message || err) });
+    await refreshReviewButton();
+    updateReviewModalActions();
+    focusReviewModalAction();
+  }
+}
+
+async function rollbackEnhancement() {
+  if (!lastEnhanceBackup) return;
+  const ok = confirm(`Roll back to backup ${lastEnhanceBackup.timestamp}? This will overwrite your current instructions and playbooks.`);
+  if (!ok) return;
+  try {
+    const result = await window.api.enhanceRollback(lastEnhanceBackup.timestamp);
+    showToast({
+      type: 'success',
+      title: 'Rolled back',
+      body: `Restored ${result.restored.length} item(s) from ${result.timestamp}`,
+    });
+    closeReviewModal({ restoreFocus: false });
+    await refreshReviewButton();
+    focusReviewTrigger();
+    if (!instructionsPanel.classList.contains('hidden')) {
+      await showInstructions();
+    }
+  } catch (err) {
+    showToast({ type: 'error', title: 'Rollback failed', body: String(err.message || err) });
+    await refreshReviewButton();
+    updateReviewModalActions();
+    focusReviewModalAction();
+  }
+}
+
+btnEnhance.addEventListener('click', openEnhanceConfirm);
+document.getElementById('btn-enhance-cancel').addEventListener('click', closeEnhanceConfirm);
+document.getElementById('btn-enhance-confirm').addEventListener('click', startEnhancement);
+btnReview.addEventListener('click', openReviewModal);
+document.getElementById('btn-review-close').addEventListener('click', closeReviewModal);
+document.getElementById('btn-review-apply').addEventListener('click', applyEnhancement);
+document.getElementById('btn-review-discard').addEventListener('click', discardEnhancement);
+document.getElementById('btn-review-rollback').addEventListener('click', rollbackEnhancement);
+enhanceConfirmModal.addEventListener('click', (e) => {
+  if (isBackdropClickTarget(e.target)) closeEnhanceConfirm();
+});
+reviewModal.addEventListener('click', (e) => {
+  if (isBackdropClickTarget(e.target)) closeReviewModal();
+});
+
+// Trap focus inside the active modal and let Esc close it.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') {
+    if (!reviewModal.classList.contains('hidden') && trapFocusWithin(e, reviewModalContent)) {
+      return;
+    }
+    if (!enhanceConfirmModal.classList.contains('hidden') && trapFocusWithin(e, enhanceConfirmContent)) {
+      return;
+    }
+  }
+  if (e.key === 'Escape') {
+    if (!reviewModal.classList.contains('hidden')) {
+      closeReviewModal();
+      e.stopPropagation();
+    } else if (!enhanceConfirmModal.classList.contains('hidden')) {
+      closeEnhanceConfirm();
+      e.stopPropagation();
+    }
+  }
+});
+
+// Refresh on initial load
+refreshReviewButton();
+
+
 function showImportMenu() {
   // Remove existing menu if any
   document.querySelectorAll('.import-menu').forEach(el => el.remove());
@@ -2200,9 +3788,13 @@ function shortenPath(p) {
 const resizeHandle = document.getElementById('resize-handle');
 const sidebar = document.getElementById('sidebar');
 let isResizing = false;
+let resizeStartX = 0;
+let resizeDidDrag = false;
 
-resizeHandle.addEventListener('mousedown', () => {
+resizeHandle.addEventListener('mousedown', (e) => {
   isResizing = true;
+  resizeStartX = e.clientX;
+  resizeDidDrag = false;
   resizeHandle.classList.add('dragging');
   document.body.style.cursor = 'col-resize';
   document.body.style.userSelect = 'none';
@@ -2210,8 +3802,27 @@ resizeHandle.addEventListener('mousedown', () => {
 
 document.addEventListener('mousemove', (e) => {
   if (!isResizing) return;
-  const newWidth = Math.max(200, Math.min(450, e.clientX));
-  sidebar.style.width = newWidth + 'px';
+  if (!resizeDidDrag && Math.abs(e.clientX - resizeStartX) > 3) resizeDidDrag = true;
+  if (!resizeDidDrag) return;
+  // Un-hide on drag
+  if (sidebarHidden) {
+    setSidebarHidden(false, { persist: false });
+  }
+
+  const nextSidebarState = resolveSidebarDragWidth(e.clientX, {
+    minWidth: SIDEBAR_MIN_WIDTH,
+    maxWidth: SIDEBAR_MAX_WIDTH
+  });
+
+  if (nextSidebarState.mode === 'collapsed') {
+    // Dragged narrow enough → snap into collapsed icon mode.
+    setSidebarCollapsed(true, { persist: false });
+  } else {
+    if (sidebarCollapsed) {
+      setSidebarCollapsed(false, { persist: false });
+    }
+    sidebar.style.width = nextSidebarState.width + 'px';
+  }
 });
 
 document.addEventListener('mouseup', () => {
@@ -2221,8 +3832,22 @@ document.addEventListener('mouseup', () => {
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
 
-    const width = parseInt(sidebar.style.width, 10);
-    if (width) window.api.updateSettings({ sidebarWidth: width });
+    if (!resizeDidDrag) {
+      // Click → toggle full hide
+      setSidebarHidden(!sidebarHidden);
+    } else {
+      const width = parseInt(sidebar.style.width, 10);
+      if (sidebarCollapsed) {
+        if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = false;
+        if (window._cachedSettings) window._cachedSettings.sidebarHidden = false;
+        window.api.updateSettings({ sidebarCollapsed: false, sidebarHidden: false });
+      } else if (width) {
+        persistSidebarWidth(width);
+        if (window._cachedSettings) window._cachedSettings.sidebarCollapsed = false;
+        if (window._cachedSettings) window._cachedSettings.sidebarHidden = false;
+        window.api.updateSettings({ sidebarCollapsed: false, sidebarHidden: false });
+      }
+    }
 
     fitActiveTerminal();
   }
@@ -2247,12 +3872,35 @@ searchClear.addEventListener('click', () => {
   renderSessionList();
   searchInput.focus();
 });
+sidebarSearchToggle.addEventListener('click', () => focusSidebarSearch());
+sessionSearchInput.addEventListener('input', () => {
+  refreshSessionSearch(false);
+});
+sessionSearchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    e.stopPropagation();
+    stepSessionSearch(e.shiftKey ? -1 : 1);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSessionSearch();
+  }
+});
+sessionSearchPrev.addEventListener('click', () => stepSessionSearch(-1));
+sessionSearchNext.addEventListener('click', () => stepSessionSearch(1));
+sessionSearchClose.addEventListener('click', () => closeSessionSearch());
 btnNew.addEventListener('click', newSession);
 btnNewCenter.addEventListener('click', newSession);
 
 maxConcurrentInput.addEventListener('change', (e) => {
   const val = parseInt(e.target.value, 10);
   if (val >= 1 && val <= 20) window.api.updateSettings({ maxConcurrent: val });
+});
+
+useAgencyCopilotInput.addEventListener('change', async (e) => {
+  const settings = await window.api.updateSettings({ useAgencyCopilot: e.target.checked });
+  applySettingsToControls(settings);
 });
 
 promptWorkdirInput.addEventListener('change', (e) => {
@@ -2271,6 +3919,18 @@ btnPickDefaultWorkdir.addEventListener('click', async () => {
 btnClearDefaultWorkdir.addEventListener('click', () => {
   defaultWorkdirInput.value = '';
   window.api.updateSettings({ defaultWorkdir: '' });
+});
+
+autoUpdateToggle.addEventListener('change', (e) => {
+  window.api.updateSettings({ autoUpdateEnabled: e.target.checked });
+  betaChannelRow.classList.toggle('disabled', !e.target.checked);
+  betaChannelToggle.disabled = !e.target.checked;
+  window.api.applyUpdateSettings();
+});
+
+betaChannelToggle.addEventListener('change', (e) => {
+  window.api.updateSettings({ updateChannel: e.target.checked ? 'beta' : 'stable' });
+  window.api.applyUpdateSettings();
 });
 
 // Notification functions
@@ -2324,9 +3984,13 @@ async function refreshNotifications() {
   if (unread > 0) {
     notificationBadge.textContent = unread > 99 ? '99+' : unread;
     notificationBadge.classList.remove('hidden');
+    notificationBadge.setAttribute('aria-label', `${unread} unread notification${unread === 1 ? '' : 's'}`);
+    notificationBadge.setAttribute('aria-hidden', 'false');
   } else {
     notificationBadge.classList.add('hidden');
+    notificationBadge.setAttribute('aria-hidden', 'true');
   }
+  announceLiveMessage(unread > 0 ? `${unread} unread notification${unread === 1 ? '' : 's'}.` : 'All notifications read.');
 
   // Update dropdown list
   if (notifications.length === 0) {
@@ -2404,6 +4068,7 @@ function showToast(notification) {
   });
 
   toastContainer.appendChild(toast);
+  announceLiveMessage([notification.title, notification.body].filter(Boolean).join('. '));
 
   // Auto-dismiss after 6 seconds
   setTimeout(() => {
@@ -2419,7 +4084,12 @@ async function applyZoom(direction) {
   await window.api.setZoom(direction);
   syncTitlebarPadding();
   // Small delay lets Electron apply the new factor before we refit
-  setTimeout(() => { for (const { fitAddon } of terminals.values()) try { fitAddon.fit(); } catch {} }, 100);
+  setTimeout(() => {
+    for (const { terminal, fitAddon } of terminals.values()) {
+      try { fitAddon.fit(); } catch {}
+      try { terminal.scrollToBottom(); } catch {}
+    }
+  }, 100);
 }
 
 // Ctrl+Scroll zoom
@@ -2431,60 +4101,54 @@ document.addEventListener('wheel', (e) => {
 
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
-  const mod = e.ctrlKey || e.metaKey;
-
-  // Ctrl/Cmd+N or Ctrl/Cmd+T: Create new session from anywhere
-  if (mod && (e.key === 'n' || e.key === 't')) { 
-    e.preventDefault(); 
-    newSession(); 
-  }
-
-  // Zoom: Ctrl/Cmd + '+'/'-'/'0'
-  if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); applyZoom('in'); return; }
-  if (mod && e.key === '-') { e.preventDefault(); applyZoom('out'); return; }
-  if (mod && e.key === '0') { e.preventDefault(); applyZoom('reset'); return; }
-
-  // Ctrl/Cmd+Tab: Switch between session tabs
-  if (e.ctrlKey && e.key === 'Tab') {
+  const shortcutAction = getGlobalShortcutAction(e, {
+    activeElement: document.activeElement,
+    hasActiveSession: !!(activeSessionId && terminals.has(activeSessionId)),
+  });
+  if (shortcutAction) {
     e.preventDefault();
-    const tabs = [...document.querySelectorAll('.tab')];
-    if (tabs.length < 2) return;
-    const i = tabs.findIndex(t => t.dataset.sessionId === activeSessionId);
-    const next = e.shiftKey ? (i - 1 + tabs.length) % tabs.length : (i + 1) % tabs.length;
-    switchToSession(tabs[next].dataset.sessionId);
-  }
-
-  // Ctrl/Cmd+W: Close current session tab
-  if (mod && e.key === 'w') {
-    e.preventDefault();
-    const ae = document.activeElement;
-    const isXterm = ae?.classList.contains('xterm-helper-textarea');
-    if (!isXterm && (ae?.tagName === 'INPUT' || ae?.tagName === 'TEXTAREA')) return;
-    if (activeSessionId) closeTab(activeSessionId);
-  }
-
-  // Ctrl/Cmd+Shift+T: Restore last closed tab
-  if (mod && e.shiftKey && e.key === 'T') {
-    e.preventDefault();
-    const sessionId = recentlyClosedSessions.pop();
-    if (sessionId) openSession(sessionId);
-  }
-
-  // Ctrl/Cmd+I: Toggle status panel
-  if (mod && e.key === 'i') {
-    e.preventDefault();
-    toggleStatusPanel();
-  }
-
-  // Ctrl/Cmd+F: Focus search bar
-  if (mod && e.key === 'f') {
-    e.preventDefault();
-    searchInput.focus();
-    searchInput.select();
-    document.getElementById('search-wrapper').classList.add('search-active');
+    switch (shortcutAction.type) {
+      case 'new-session':
+        newSession();
+        return;
+      case 'zoom':
+        applyZoom(shortcutAction.direction);
+        return;
+      case 'switch-tab': {
+        const tabs = [...document.querySelectorAll('.tab')];
+        if (tabs.length < 2) return;
+        const i = tabs.findIndex(t => t.dataset.sessionId === activeSessionId);
+        const next = shortcutAction.direction < 0
+          ? (i - 1 + tabs.length) % tabs.length
+          : (i + 1) % tabs.length;
+        switchToSession(tabs[next].dataset.sessionId);
+        return;
+      }
+      case 'close-tab':
+        if (activeSessionId) closeTab(activeSessionId);
+        return;
+      case 'restore-tab':
+        void restoreMostRecentClosedTab();
+        return;
+      case 'toggle-status':
+        toggleStatusPanel();
+        return;
+      case 'session-search':
+        openSessionSearch();
+        return;
+      case 'sidebar-search':
+        focusSidebarSearch();
+        return;
+      default:
+        break;
+    }
   }
 
   if (e.key === 'Escape') {
+    if (!sessionSearch.classList.contains('hidden')) {
+      closeSessionSearch();
+      return;
+    }
     // Close context menu first if open
     const ctxMenu = document.getElementById('tab-context-menu');
     if (ctxMenu) {
@@ -2506,4 +4170,12 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-init();
+init()
+  .then(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    startupLoading.complete();
+  })
+  .catch((error) => {
+    console.error('DeepSky startup failed', error);
+    startupLoading.fail(error);
+  });
