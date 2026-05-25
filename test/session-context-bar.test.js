@@ -534,32 +534,23 @@ describe('side dot mirrors WORKING/WAITING status (green vs yellow), not just al
     expect(greenRule[0]).toMatch(/box-shadow\s*:[^;]*var\(--green\)/);
   });
 
-  it('collapsed-sidebar dot is enlarged and ringed with a contrast border so green/yellow are clearly distinguishable at small sizes', () => {
+  it('collapsed-sidebar dot un-hides and uses vivid (non-pastel) colors so green/yellow are distinguishable', () => {
+    // Base rule hides the dot (display: none) so the expanded sidebar's
+    // text pill is not duplicated; the collapsed override flips it back on.
     const m = css.match(/#sidebar\.collapsed \.session-item\.running::after\s*\{[\s\S]*?\n\}/);
-    expect(m, 'collapsed-sidebar dot override must be findable').not.toBeNull();
+    expect(m, 'collapsed-sidebar dot un-hide rule must be findable').not.toBeNull();
     const rule = m[0];
-    // Dot must be at least 10px wide in collapsed mode (was 7px and hard to see).
-    const wMatch = rule.match(/width\s*:\s*(\d+)px/);
-    expect(wMatch, 'collapsed dot must declare a width').not.toBeNull();
-    expect(Number(wMatch[1])).toBeGreaterThanOrEqual(10);
-    // A contrasting border ring separates the dot from the sidebar bg.
-    expect(rule).toMatch(/border\s*:\s*\d+px\s+solid\s+var\(--bg\)/);
-    // Multi-layered box-shadow (inner outline + outer glow) for vivid pop.
-    const shadowMatch = rule.match(/box-shadow\s*:([^;]+);/);
-    expect(shadowMatch, 'collapsed dot must declare a box-shadow').not.toBeNull();
-    const commaCount = (shadowMatch[1].match(/,/g) || []).length;
-    expect(commaCount, 'multi-layer box-shadow (outline + glow)').toBeGreaterThanOrEqual(1);
-  });
+    expect(rule).toMatch(/display\s*:\s*block/);
+    // Color must NOT be the pastel var(--yellow) — those are too close to
+    // var(--green) in luminosity at 7px. Use an explicit saturated hex.
+    expect(rule).not.toMatch(/background\s*:\s*var\(--yellow\)/);
+    expect(rule).toMatch(/background\s*:\s*#[0-9a-fA-F]{3,6}/);
 
-  it('collapsed-sidebar WORKING dot has a pulsing animation and reduced-motion fallback', () => {
-    // The .busy override under #sidebar.collapsed should declare an animation.
-    const m = css.match(/#sidebar\.collapsed \.session-item\.running\.busy::after\s*\{[\s\S]*?\n\}/);
-    expect(m, 'collapsed busy dot override must be findable').not.toBeNull();
-    expect(m[0]).toMatch(/animation\s*:\s*session-dot-pulse/);
-    // The named keyframes block exists.
-    expect(css).toMatch(/@keyframes\s+session-dot-pulse\s*\{/);
-    // prefers-reduced-motion overrides the animation back to none.
-    expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?animation\s*:\s*none/);
+    // Busy override likewise uses a vivid hex green, not var(--green).
+    const busy = css.match(/#sidebar\.collapsed \.session-item\.running\.busy::after\s*\{[\s\S]*?\n\}/);
+    expect(busy, 'collapsed busy dot override must be findable').not.toBeNull();
+    expect(busy[0]).not.toMatch(/background\s*:\s*var\(--green\)/);
+    expect(busy[0]).toMatch(/background\s*:\s*#[0-9a-fA-F]{3,6}/);
   });
 
   it('createSessionItem applies the .busy class on initial render when sessionBusyState is true', () => {

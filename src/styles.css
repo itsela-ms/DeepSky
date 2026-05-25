@@ -1301,53 +1301,20 @@ body {
   color: var(--accent);
 }
 
-/* Collapsed-sidebar dot — bigger, saturated, with a strong glow and a
-   contrasting ring so the user can distinguish WORKING (green/pulsing) vs
-   WAITING (yellow/solid) at a glance even at the small collapsed size.
-   Theme pastels (Catppuccin mocha #a6e3a1 / #f9e2af) were too close in
-   luminosity at 7px with a 40%-faded shadow, so we override with full
-   saturation, a 2px outline ring, and an active pulse for the busy state. */
+/* Collapsed-sidebar dot — un-hide and override colors with more saturated
+   tones so WAITING (yellow) and WORKING (green) are clearly distinguishable.
+   The Catppuccin pastels (--yellow / --green) are too close in luminosity
+   at 7px, so we substitute vivid amber and emerald here only. Geometry,
+   size, ring and any animation are intentionally NOT changed. */
 #sidebar.collapsed .session-item.running::after {
   display: block;
-  top: 6px;
-  right: 6px;
-  width: 11px;
-  height: 11px;
-  border: 2px solid var(--bg);
-  background: var(--yellow);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--yellow) 80%, black),
-    0 0 8px color-mix(in srgb, var(--yellow) 90%, transparent);
+  background: #f5b500;
+  box-shadow: 0 0 6px color-mix(in srgb, #f5b500 55%, transparent);
 }
 
 #sidebar.collapsed .session-item.running.busy::after {
-  background: var(--green);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--green) 80%, black),
-    0 0 10px color-mix(in srgb, var(--green) 95%, transparent);
-  animation: session-dot-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes session-dot-pulse {
-  0%, 100% {
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--green) 80%, black),
-      0 0 10px color-mix(in srgb, var(--green) 95%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--green) 90%, black),
-      0 0 16px color-mix(in srgb, var(--green) 100%, transparent),
-      0 0 24px color-mix(in srgb, var(--green) 50%, transparent);
-  }
-}
-
-/* Respect users with reduced-motion preference — keep the steady glow,
-   skip the pulsing animation. */
-@media (prefers-reduced-motion: reduce) {
-  #sidebar.collapsed .session-item.running.busy::after {
-    animation: none;
-  }
+  background: #22c55e;
+  box-shadow: 0 0 6px color-mix(in srgb, #22c55e 55%, transparent);
 }
 
 /* Empty state */
