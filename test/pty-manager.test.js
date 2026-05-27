@@ -532,11 +532,12 @@ describe('PtyManager', () => {
       expect(args).not.toContain('--name');
     });
 
-    it('openSession still uses --resume <id> (existing sessions must resume by ID)', () => {
+    it('openSession uses --session-id <id> so local history folders reopen even if resume index misses them', () => {
       mockPtyModule.spawn.mockClear();
       manager.openSession('existing-session-xyz', '/cwd');
       const [, args] = mockPtyModule.spawn.mock.calls[0];
-      expect(args).toContain('--resume');
+      expect(args).toContain('--session-id');
+      expect(args).not.toContain('--resume');
       expect(args).toContain('existing-session-xyz');
       expect(args).toContain('--yolo');
     });

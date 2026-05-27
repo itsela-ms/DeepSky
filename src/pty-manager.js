@@ -137,7 +137,10 @@ class PtyManager extends EventEmitter {
     const spawnCwd = cwd || os.homedir();
     let ptyProcess;
     try {
-      const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+      // `--resume <id>` depends on the CLI resume index, which can reject
+      // local history folders. `--session-id` resumes local state by UUID and
+      // keeps history cards reopenable even when that index is stale.
+      const spawnConfig = this._spawnArgs(['--session-id', sessionId, '--yolo'], launcher);
       launcher = spawnConfig.launcher;
       const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
@@ -151,7 +154,7 @@ class PtyManager extends EventEmitter {
       // If spawn fails with given cwd, retry with homedir
       if (cwd && cwd !== os.homedir()) {
         try {
-          const spawnConfig = this._spawnArgs(['--resume', sessionId, '--yolo'], launcher);
+          const spawnConfig = this._spawnArgs(['--session-id', sessionId, '--yolo'], launcher);
           launcher = spawnConfig.launcher;
           const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {

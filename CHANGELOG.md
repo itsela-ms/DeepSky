@@ -4,6 +4,11 @@ All notable changes to DeepSky are documented here.
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-05-27
+
+### Fixed
+- **History sessions reopen again** — opening a saved/history session now uses `copilot --session-id <uuid>` instead of `--resume <uuid>`, so DeepSky can reopen local `~/.copilot/session-state` folders even when Copilot CLI's resume index does not recognize the UUID (`No session, task, or name matched ...`).
+
 ## [1.2.2] - 2026-05-27
 
 ### Added
