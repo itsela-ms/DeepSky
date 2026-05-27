@@ -3,23 +3,62 @@ const path = require('path');
 const readline = require('readline');
 
 const CACHE_FILE = 'session-resources.json';
+const RESOURCE_INDEX_VERSION = 4;
 const REBUILD_INTERVAL_MS = 10 * 60 * 1000;
+const VISIBLE_TEXT_KEYS = new Set(['content', 'text', 'body', 'title', 'summary', 'markdown', 'message']);
+const PR_STATUS_MAP = {
+  '1': 'active',
+  '2': 'abandoned',
+  '3': 'completed',
+  active: 'active',
+  abandoned: 'abandoned',
+  completed: 'completed'
+};
 
 // Patterns for extracting resources
 const PR_URL_RE = /https?:\/\/[^\s"\\)]*\/pullrequest\/(\d+)/g;
 const WI_URL_RE = /https?:\/\/[^\s"\\)]*\/_workitems\/edit\/(\d+)/g;
-const GIT_URL_RE = /https?:\/\/(?:microsoft\.visualstudio\.com|dev\.azure\.com\/microsoft)\/(?:DefaultCollection\/)?(\w+)\/_git\/([^\s"\\);,]+)/g;
+const GIT_URL_RE = /https?:\/\/(?:microsoft\.visualstudio\.com|dev\.azure\.com\/microsoft)\/(?:DefaultCollection\/)?(\w+)\/_git\/([^\s"'`\\)\]\};,]+)/g;
 const WIKI_URL_RE = /https?:\/\/[^\s"\\)]*\/_wiki\/[^\s"\\)]+/g;
 const PIPELINE_URL_RE = /https?:\/\/[^\s"\\)]*\/_build\/results\?buildId=(\d+)[^\s"\\)]*/g;
 const PIPELINE_DEF_URL_RE = /https?:\/\/[^\s"\\)]*\/_build\?definitionId=(\d+)[^\s"\\)]*/g;
 const RELEASE_URL_RE = /https?:\/\/[^\s"\\)]*\/_releaseProgress\?[^\s"\\)]*releaseId=(\d+)[^\s"\\)]*/g;
-const PR_ID_TOOL_RE = /"pullRequestId"\s*:\s*(\d+)/g;
+const GITHUB_REPO_URL_RE = /https?:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9_.-]+(?:\.git)?(?:[/?#][^\s"'`\\)\]\};,]*)?/g;
 const PR_STATUS_RE = /"pullRequestId"\s*:\s*(\d+)[^}]*?"status"\s*:\s*"(active|completed|abandoned)"/gi;
 const PR_STATUS_ESCAPED_RE = /\\?"pullRequestId\\?"\s*:\s*(\d+)[\s\S]{0,200}?\\?"status\\?"\s*:\s*(\d+|\\?"(?:active|completed|abandoned)\\?")/gi;
-const WI_ID_TOOL_RE = /"workItemId"\s*:\s*(\d+)/g;
+
+function stripTrailingUrlJunk(url) {
+  return (url || '').replace(/[)}\]'"`\\;,]+$/, '');
+}
+
+function stripTrailingSentencePunctuation(url) {
+  return (url || '').replace(/[.!?]+$/, '');
+}
+
+function normalizeRepoCandidateUrl(url) {
+  return stripTrailingSentencePunctuation(
+    stripTrailingUrlJunk(url).replace(/[?#].*$/, '').replace(/\/+$/, '')
+  );
+}
+
+function normalizeGitHubRepoUrl(url) {
+  url = normalizeRepoCandidateUrl(url);
+  const github = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)(?:\/.*)?$/i);
+  if (!github) return null;
+
+  const owner = github[1];
+  const repo = stripTrailingSentencePunctuation(github[2].replace(/\.git$/i, ''));
+  if (!owner || !repo || owner === '.' || owner === '..' || repo === '.' || repo === '..') {
+    return null;
+  }
+
+  return `https://github.com/${owner}/${repo}`;
+}
 
 function normalizeRepoUrl(url) {
-  url = (url || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+  url = normalizeRepoCandidateUrl(url);
+  const githubUrl = normalizeGitHubRepoUrl(url);
+  if (githubUrl) return githubUrl;
   // Canonicalize host variants to a consistent form
   url = url.replace(/microsoft\.visualstudio\.com/, 'dev.azure.com/microsoft');
   url = url.replace(/\/DefaultCollection\//, '/');
@@ -33,10 +72,69 @@ function normalizeRepoUrl(url) {
   return url;
 }
 
+function repoNameFromUrl(url) {
+  const github = normalizeRepoUrl(url).match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)$/i);
+  if (github) return github[1];
+  return normalizeRepoUrl(url).match(/_git\/(.+)/)?.[1] || url;
+}
+
 function resourceKey(r) {
   if (r.id) return `${r.type}:${r.id}`;
   const url = r.type === 'repo' ? normalizeRepoUrl(r.url) : (r.url || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
   return `${r.type}:${url}`;
+}
+
+function collectRenderableStrings(value, push, keyHint = '') {
+  if (!value) return;
+
+  if (typeof value === 'string') {
+    if (!keyHint || VISIBLE_TEXT_KEYS.has(keyHint)) push(value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectRenderableStrings(item, push, keyHint);
+    return;
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value)) {
+      collectRenderableStrings(nested, push, key);
+    }
+  }
+}
+
+function collectVisibleAssistantTexts(data, push) {
+  if (!data) return;
+  collectRenderableStrings(data.content, push, 'content');
+  collectRenderableStrings(data.sections, push);
+  collectRenderableStrings(data.parts, push);
+  collectRenderableStrings(data.blocks, push);
+}
+
+function isChildAssistantMessage(data) {
+  return !!data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, 'parentToolCallId');
+}
+
+function collectVisibleResourceTexts(event) {
+  const texts = [];
+  const push = (text) => {
+    const normalized = String(text || '').trim();
+    if (normalized) texts.push(normalized);
+  };
+
+  if (event?.type === 'user.message') {
+    push(event.data?.content);
+    push(event.data?.transformedContent);
+  } else if (event?.type === 'assistant.message' && !isChildAssistantMessage(event.data)) {
+    collectVisibleAssistantTexts(event.data, push);
+  }
+
+  return texts;
+}
+
+function canUseEventForPrStatus(event) {
+  return event?.type === 'tool.execution_complete';
 }
 
 class ResourceIndexer {
@@ -92,15 +190,25 @@ class ResourceIndexer {
       const sessionDir = path.join(this.sessionStateDir, sessionId);
 
       const cached = this.cache[sessionId];
-      if (cached) {
-        try {
-          const stat = await fs.promises.stat(sessionDir);
-          if (stat.mtime.getTime() <= cached.indexedAt) continue;
-        } catch { continue; }
+      let eventsMtime = null;
+      try {
+        const stat = await fs.promises.stat(path.join(sessionDir, 'events.jsonl'));
+        eventsMtime = stat.mtime.getTime();
+      } catch (err) {
+        if (err?.code !== 'ENOENT') continue;
+      }
+      if (cached?.version === RESOURCE_INDEX_VERSION) {
+        if (eventsMtime === null && Array.isArray(cached.resources) && cached.resources.length === 0) continue;
+        if (eventsMtime !== null && eventsMtime <= cached.indexedAt) continue;
       }
 
       const resources = await this._extractResources(sessionDir);
-      this.cache[sessionId] = { resources, indexedAt: Date.now() };
+      this.cache[sessionId] = {
+        ...cached,
+        resources,
+        indexedAt: eventsMtime ?? Date.now(),
+        version: RESOURCE_INDEX_VERSION
+      };
       updated = true;
     }
 
@@ -123,124 +231,115 @@ class ResourceIndexer {
       const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
       rl.on('line', (line) => {
-        // Search the raw line for efficiency (most patterns work across any field)
-        let m;
+        let event;
+        try { event = JSON.parse(line); } catch { return; }
 
-        // PR URLs (includes PR ID + repo context)
-        const prUrlRe = new RegExp(PR_URL_RE.source, 'g');
-        while ((m = prUrlRe.exec(line)) !== null) {
-          const prId = m[1];
-          const url = m[0].replace(/[)}\]"\\]+$/, ''); // strip trailing junk
-          const repoMatch = url.match(/_git\/([^/]+)\/pullrequest/);
-          const existing = prs.get(prId);
-          if (existing) {
-            if (!existing.url) existing.url = url;
-            if (!existing.repo && repoMatch) existing.repo = repoMatch[1];
-          } else {
-            prs.set(prId, {
-              id: prId,
-              url,
-              repo: repoMatch ? repoMatch[1] : null,
-              type: 'pr',
-              state: null
-            });
-          }
-        }
+        // Only visible user/assistant text creates URL resources. Tool output can
+        // include large search/result payloads that are not intentionally related.
+        const visibleTexts = collectVisibleResourceTexts(event);
+        for (const text of visibleTexts) {
+          let m;
 
-        // PR IDs from tool calls
-        const prIdRe = new RegExp(PR_ID_TOOL_RE.source, 'g');
-        while ((m = prIdRe.exec(line)) !== null) {
-          const prId = m[1];
-          if (!prs.has(prId)) {
-            prs.set(prId, { id: prId, url: null, repo: null, type: 'pr', state: null });
-          }
-        }
-
-        // PR status from tool call arguments (e.g. "pullRequestId": 123, ..., "status": "Active")
-        const prStatusRe = new RegExp(PR_STATUS_RE.source, 'gi');
-        while ((m = prStatusRe.exec(line)) !== null) {
-          const prId = m[1];
-          const state = m[2].toLowerCase();
-          const existing = prs.get(prId);
-          if (existing) {
-            existing.state = state;
-          }
-        }
-
-        // PR status from escaped JSON in tool responses (e.g. \"status\":1 or \"status\":\"active\")
-        const prStatusEscRe = new RegExp(PR_STATUS_ESCAPED_RE.source, 'gi');
-        while ((m = prStatusEscRe.exec(line)) !== null) {
-          const prId = m[1];
-          const rawState = m[2].replace(/\\?"/g, '');
-          const STATUS_MAP = { '1': 'active', '2': 'abandoned', '3': 'completed', 'active': 'active', 'abandoned': 'abandoned', 'completed': 'completed' };
-          const state = STATUS_MAP[rawState.toLowerCase()];
-          if (state) {
+          // PR URLs (includes PR ID + repo context)
+          const prUrlRe = new RegExp(PR_URL_RE.source, 'g');
+          while ((m = prUrlRe.exec(text)) !== null) {
+            const prId = m[1];
+            const url = stripTrailingUrlJunk(m[0]);
+            const repoMatch = url.match(/_git\/([^/]+)\/pullrequest/);
             const existing = prs.get(prId);
-            if (existing) existing.state = state;
-          }
-        }
-
-        // Work item URLs
-        const wiUrlRe = new RegExp(WI_URL_RE.source, 'g');
-        while ((m = wiUrlRe.exec(line)) !== null) {
-          const wiId = m[1];
-          const url = m[0].replace(/[)}\]"\\]+$/, '');
-          workItems.set(wiId, { id: wiId, url, type: 'workitem' });
-        }
-
-        // Work item IDs from tool calls
-        const wiIdRe = new RegExp(WI_ID_TOOL_RE.source, 'g');
-        while ((m = wiIdRe.exec(line)) !== null) {
-          const wiId = m[1];
-          if (!workItems.has(wiId)) {
-            workItems.set(wiId, { id: wiId, url: null, type: 'workitem' });
-          }
-        }
-
-        // Git repo URLs (exclude PR URLs)
-        const gitUrlRe = new RegExp(GIT_URL_RE.source, 'g');
-        while ((m = gitUrlRe.exec(line)) !== null) {
-          let repoUrl = m[0].replace(/[)}\]"\\;,]+$/, '');
-          if (!repoUrl.includes('/pullrequest/')) {
-            // Normalize: keep only up to /_git/RepoName
-            const gitIdx = repoUrl.indexOf('/_git/');
-            if (gitIdx !== -1) {
-              const afterGit = repoUrl.substring(gitIdx + 6);
-              const repoName = afterGit.split('/')[0];
-              repoUrl = repoUrl.substring(0, gitIdx + 6) + repoName;
+            if (existing) {
+              if (!existing.url) existing.url = url;
+              if (!existing.repo && repoMatch) existing.repo = repoMatch[1];
+            } else {
+              prs.set(prId, {
+                id: prId,
+                url,
+                repo: repoMatch ? repoMatch[1] : null,
+                type: 'pr',
+                state: null
+              });
             }
-            repos.add(repoUrl);
+          }
+
+          // Work item URLs
+          const wiUrlRe = new RegExp(WI_URL_RE.source, 'g');
+          while ((m = wiUrlRe.exec(text)) !== null) {
+            const wiId = m[1];
+            const url = stripTrailingUrlJunk(m[0]);
+            workItems.set(wiId, { id: wiId, url, type: 'workitem' });
+          }
+
+          // Git repo URLs (exclude PR URLs)
+          const gitUrlRe = new RegExp(GIT_URL_RE.source, 'g');
+          while ((m = gitUrlRe.exec(text)) !== null) {
+            let repoUrl = stripTrailingUrlJunk(m[0]);
+            if (!repoUrl.includes('/pullrequest/')) {
+              repos.add(normalizeRepoUrl(repoUrl));
+            }
+          }
+
+          const githubRepoRe = new RegExp(GITHUB_REPO_URL_RE.source, 'g');
+          while ((m = githubRepoRe.exec(text)) !== null) {
+            const repoUrl = normalizeGitHubRepoUrl(m[0]);
+            if (repoUrl) repos.add(repoUrl);
+          }
+
+          // Wiki URLs
+          const wikiRe = new RegExp(WIKI_URL_RE.source, 'g');
+          while ((m = wikiRe.exec(text)) !== null) {
+            wikiUrls.add(stripTrailingUrlJunk(m[0]));
+          }
+
+          // Pipeline URLs (build results)
+          const pipelineRe = new RegExp(PIPELINE_URL_RE.source, 'g');
+          while ((m = pipelineRe.exec(text)) !== null) {
+            const buildId = m[1];
+            if (!pipelines.has(buildId)) {
+              pipelines.set(buildId, { id: buildId, url: stripTrailingUrlJunk(m[0]), type: 'pipeline' });
+            }
+          }
+          const pipelineDefRe = new RegExp(PIPELINE_DEF_URL_RE.source, 'g');
+          while ((m = pipelineDefRe.exec(text)) !== null) {
+            const defId = `def-${m[1]}`;
+            if (!pipelines.has(defId)) {
+              pipelines.set(defId, { id: defId, url: stripTrailingUrlJunk(m[0]), type: 'pipeline' });
+            }
+          }
+
+          // Release URLs
+          const releaseRe = new RegExp(RELEASE_URL_RE.source, 'g');
+          while ((m = releaseRe.exec(text)) !== null) {
+            const releaseId = m[1];
+            if (!releases.has(releaseId)) {
+              releases.set(releaseId, { id: releaseId, url: stripTrailingUrlJunk(m[0]), type: 'release' });
+            }
           }
         }
 
-        // Wiki URLs
-        const wikiRe = new RegExp(WIKI_URL_RE.source, 'g');
-        while ((m = wikiRe.exec(line)) !== null) {
-          wikiUrls.add(m[0].replace(/[)}\]"\\]+$/, ''));
-        }
+        if (canUseEventForPrStatus(event)) {
+          let m;
 
-        // Pipeline URLs (build results)
-        const pipelineRe = new RegExp(PIPELINE_URL_RE.source, 'g');
-        while ((m = pipelineRe.exec(line)) !== null) {
-          const buildId = m[1];
-          if (!pipelines.has(buildId)) {
-            pipelines.set(buildId, { id: buildId, url: m[0].replace(/[)}\]"\\]+$/, ''), type: 'pipeline' });
+          // PR status from tool payloads (e.g. "pullRequestId": 123, ..., "status": "Active")
+          const prStatusRe = new RegExp(PR_STATUS_RE.source, 'gi');
+          while ((m = prStatusRe.exec(line)) !== null) {
+            const prId = m[1];
+            const state = m[2].toLowerCase();
+            const existing = prs.get(prId);
+            if (existing) {
+              existing.state = state;
+            }
           }
-        }
-        const pipelineDefRe = new RegExp(PIPELINE_DEF_URL_RE.source, 'g');
-        while ((m = pipelineDefRe.exec(line)) !== null) {
-          const defId = `def-${m[1]}`;
-          if (!pipelines.has(defId)) {
-            pipelines.set(defId, { id: defId, url: m[0].replace(/[)}\]"\\]+$/, ''), type: 'pipeline' });
-          }
-        }
 
-        // Release URLs
-        const releaseRe = new RegExp(RELEASE_URL_RE.source, 'g');
-        while ((m = releaseRe.exec(line)) !== null) {
-          const releaseId = m[1];
-          if (!releases.has(releaseId)) {
-            releases.set(releaseId, { id: releaseId, url: m[0].replace(/[)}\]"\\]+$/, ''), type: 'release' });
+          // PR status from escaped JSON in tool responses (e.g. \"status\":1 or \"status\":\"active\")
+          const prStatusEscRe = new RegExp(PR_STATUS_ESCAPED_RE.source, 'gi');
+          while ((m = prStatusEscRe.exec(line)) !== null) {
+            const prId = m[1];
+            const rawState = m[2].replace(/\\?"/g, '');
+            const state = PR_STATUS_MAP[rawState.toLowerCase()];
+            if (state) {
+              const existing = prs.get(prId);
+              if (existing) existing.state = state;
+            }
           }
         }
       });
@@ -250,7 +349,7 @@ class ResourceIndexer {
           ...[...prs.values()],
           ...[...workItems.values()],
           ...[...repos].map(url => {
-            const repoName = url.match(/_git\/(.+)/)?.[1] || url;
+            const repoName = repoNameFromUrl(url);
             return { type: 'repo', name: repoName, url };
           }),
           ...[...wikiUrls].map(url => ({ type: 'wiki', url })),
@@ -283,7 +382,7 @@ class ResourceIndexer {
 
   async addManualResource(sessionId, resource) {
     if (!this.cache[sessionId]) {
-      this.cache[sessionId] = { resources: [], indexedAt: 0 };
+      this.cache[sessionId] = { resources: [], indexedAt: 0, version: RESOURCE_INDEX_VERSION };
     }
     const entry = this.cache[sessionId];
     if (!entry.manualResources) entry.manualResources = [];
@@ -322,7 +421,7 @@ class ResourceIndexer {
     const results = new Set();
 
     for (const [sessionId, entry] of Object.entries(this.cache)) {
-      for (const r of entry.resources) {
+      for (const r of entry.resources || []) {
         if (r.id && r.id.includes(q)) { results.add(sessionId); break; }
         if (r.url && r.url.toLowerCase().includes(q)) { results.add(sessionId); break; }
         if (r.name && r.name.toLowerCase().includes(q)) { results.add(sessionId); break; }
@@ -361,7 +460,13 @@ module.exports.parseUrlToResource = function parseUrlToResource(url) {
   }
   if (url.match(/_git\//)) {
     url = normalizeRepoUrl(url);
-    const repoName = url.match(/_git\/(.+)/)?.[1] || url;
+    const repoName = repoNameFromUrl(url);
+    return { type: 'repo', name: repoName, url };
+  }
+  const githubUrl = normalizeGitHubRepoUrl(url);
+  if (githubUrl) {
+    url = githubUrl;
+    const repoName = repoNameFromUrl(url);
     return { type: 'repo', name: repoName, url };
   }
   // Generic link

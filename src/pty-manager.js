@@ -194,19 +194,25 @@ class PtyManager extends EventEmitter {
       }
     });
 
-    ptyProcess.onExit(({ exitCode }) => {
-      if (sessionEntry.alive) {
-        sessionEntry.alive = false;
-        this.emit('exit', sessionId, exitCode);
-        // Only remove from map if this is still the current entry
-        if (this.sessions.get(sessionId) === sessionEntry) {
-          this.sessions.delete(sessionId);
-        }
-      }
-    });
+    ptyProcess.onExit(({ exitCode }) => this._handleSessionExit(sessionId, sessionEntry, exitCode));
 
     this.sessions.set(sessionId, sessionEntry);
     return sessionId;
+  }
+
+  async restartSession(sessionId, cwd, launcher) {
+    const entry = this.sessions.get(sessionId);
+    if (entry?.alive) {
+      await this._waitForExitAfterKill(entry);
+      if (this.sessions.get(sessionId) !== entry) {
+        return null;
+      }
+      this.sessions.delete(sessionId);
+    } else if (entry) {
+      this.sessions.delete(sessionId);
+    }
+
+    return this.openSession(sessionId, cwd, launcher);
   }
 
   newSession(cwd, launcher, extraArgs = []) {
@@ -286,15 +292,7 @@ class PtyManager extends EventEmitter {
       }
     });
 
-    ptyProcess.onExit(({ exitCode }) => {
-      if (sessionEntry.alive) {
-        sessionEntry.alive = false;
-        this.emit('exit', sessionId, exitCode);
-        if (this.sessions.get(sessionId) === sessionEntry) {
-          this.sessions.delete(sessionId);
-        }
-      }
-    });
+    ptyProcess.onExit(({ exitCode }) => this._handleSessionExit(sessionId, sessionEntry, exitCode));
 
     this.sessions.set(sessionId, sessionEntry);
     return sessionId;
@@ -321,6 +319,47 @@ class PtyManager extends EventEmitter {
       entry.alive = false;
     }
     this.sessions.delete(sessionId);
+  }
+
+  _handleSessionExit(sessionId, sessionEntry, exitCode) {
+    const waiters = sessionEntry.exitWaiters || [];
+    const wasAlive = sessionEntry.alive;
+    if (!wasAlive && waiters.length === 0) return;
+
+    sessionEntry.alive = false;
+    sessionEntry.exitWaiters = [];
+    waiters.forEach(resolve => resolve(exitCode));
+
+    if (wasAlive && !sessionEntry.suppressExit) {
+      this.emit('exit', sessionId, exitCode);
+    }
+
+    if (this.sessions.get(sessionId) === sessionEntry && !sessionEntry.suppressExit) {
+      this.sessions.delete(sessionId);
+    }
+  }
+
+  _waitForExitAfterKill(sessionEntry, timeoutMs = 3000) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      sessionEntry.suppressExit = true;
+      sessionEntry.exitWaiters = sessionEntry.exitWaiters || [];
+      sessionEntry.exitWaiters.push(finish);
+      sessionEntry.alive = false;
+
+      try {
+        sessionEntry.pty.kill();
+      } catch {
+        finish();
+      }
+    });
   }
 
   warmUp(cwd, launcher) {
@@ -431,15 +470,7 @@ class PtyManager extends EventEmitter {
       }
     });
 
-    standby.pty.onExit(({ exitCode }) => {
-      if (sessionEntry.alive) {
-        sessionEntry.alive = false;
-        this.emit('exit', standby.id, exitCode);
-        if (this.sessions.get(standby.id) === sessionEntry) {
-          this.sessions.delete(standby.id);
-        }
-      }
-    });
+    standby.pty.onExit(({ exitCode }) => this._handleSessionExit(standby.id, sessionEntry, exitCode));
 
     this.sessions.set(standby.id, sessionEntry);
     return { id: standby.id, bufferedData: standby.bufferedData };

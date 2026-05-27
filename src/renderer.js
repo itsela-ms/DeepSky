@@ -1954,6 +1954,7 @@ function createSessionItem(session, group, index) {
   const el = document.createElement('div');
   el.className = 'session-item';
   el.dataset.sessionId = session.id;
+  if (currentSidebarTab === 'active') el.classList.add('active-list-item');
   if (session.id === activeSessionId) el.classList.add('active');
   if (sessionAliveState.has(session.id)) {
     el.classList.add('running');
@@ -2328,7 +2329,11 @@ async function handleCwdClick(sessionId) {
       }
       cwdChangingSessions.add(sessionId);
       try {
-        await window.api.changeCwd(sessionId, picked);
+        const restartedSessionId = await window.api.changeCwd(sessionId, picked);
+        if (restartedSessionId === null) {
+          await refreshSessionList();
+          return;
+        }
         sessionAliveState.add(sessionId);
       } catch (error) {
         showToast({

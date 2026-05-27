@@ -361,7 +361,7 @@ describe('chunkLooksLikeAgentActivity filters ambient pty noise', () => {
   });
 });
 
-describe('folder icon uses inline monochrome SVG (not the yellow 📂 emoji)', () => {
+describe('folder icon uses inline SVG instead of the folder emoji', () => {
   it('session card renders the cwd button with an SVG, not 📂', () => {
     // The card render block: find the cwdHtml line.
     const m = renderer.match(/cwdHtml\s*=\s*`[^`]*`/);
@@ -372,7 +372,11 @@ describe('folder icon uses inline monochrome SVG (not the yellow 📂 emoji)', (
     expect(tpl).not.toMatch(/📂/);
   });
 
-  it('CSS sizes the SVG and uses currentColor on a dim default', () => {
+  it('marks active-list session cards so their cwd affordance can be more visible', () => {
+    expect(renderer).toMatch(/currentSidebarTab\s*===\s*'active'[\s\S]{0,80}el\.classList\.add\('active-list-item'\)/);
+  });
+
+  it('CSS sizes the SVG, keeps history subtle, and colorizes active-list cwd icon outlines', () => {
     expect(css).toMatch(/\.session-cwd-icon\s*\{[\s\S]*?width:\s*1[1-4]px/);
     expect(css).toMatch(/\.session-cwd\s*\{[\s\S]*?color:\s*var\(--text-dim\)/);
     // Default opacity should be subtle (< 0.6) so the icon doesn't dominate.
@@ -380,6 +384,21 @@ describe('folder icon uses inline monochrome SVG (not the yellow 📂 emoji)', (
     expect(m, 'session-cwd opacity rule must be findable').not.toBeNull();
     const opacity = Number('0.' + m[1]);
     expect(opacity).toBeLessThan(0.6);
+
+    const activeRule = css.match(/\.session-item\.active-list-item \.session-cwd\s*\{[\s\S]*?\}/);
+    expect(activeRule, 'active-list cwd styling must be findable').not.toBeNull();
+    expect(activeRule[0]).toMatch(/color:\s*var\(--yellow\)/);
+    expect(activeRule[0]).toMatch(/background:\s*none/);
+    expect(activeRule[0]).toMatch(/border-color:\s*transparent/);
+    const activeOpacity = activeRule[0].match(/opacity:\s*0?\.(\d+)/);
+    expect(activeOpacity, 'active-list cwd opacity rule must be findable').not.toBeNull();
+    expect(Number('0.' + activeOpacity[1])).toBeGreaterThanOrEqual(0.8);
+
+    const activeFocusRule = css.match(/\.session-item\.active-list-item \.session-cwd:focus-visible\s*\{[\s\S]*?\}/);
+    expect(activeFocusRule, 'active-list cwd focus styling must be findable').not.toBeNull();
+    expect(activeFocusRule[0]).toMatch(/background:\s*none/);
+    expect(activeFocusRule[0]).toMatch(/border-color:\s*transparent/);
+    expect(activeFocusRule[0]).toMatch(/box-shadow:\s*none/);
   });
 });
 
@@ -599,4 +618,3 @@ describe('per-session red unread-notification badge removed (was noisy / not act
     expect(css).not.toMatch(/#sidebar\.collapsed[\s\S]*?\.session-notification-badge/);
   });
 });
-

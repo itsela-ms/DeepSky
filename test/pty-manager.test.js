@@ -261,6 +261,74 @@ describe('PtyManager', () => {
       expect(manager.sessions.has('reopen-1')).toBe(true);
     });
 
+    it('restartSession waits for the old pty exit before respawning the same session', async () => {
+      const id = manager.openSession('restart-1', '/old/path');
+      const oldPty = getPty(manager, id);
+      mockPtyModule.spawn.mockClear();
+
+      const restart = manager.restartSession(id, '/new/path');
+      await Promise.resolve();
+
+      expect(oldPty.kill).toHaveBeenCalled();
+      expect(mockPtyModule.spawn).not.toHaveBeenCalled();
+
+      oldPty._emitExit(0);
+      await restart;
+
+      expect(mockPtyModule.spawn).toHaveBeenCalledTimes(1);
+      expect(manager.sessions.get(id).cwd).toBe('/new/path');
+    });
+
+    it('restartSession suppresses the intentional exit event from the replaced pty', async () => {
+      const onExit = vi.fn();
+      manager.on('exit', onExit);
+      const id = manager.openSession('restart-suppress-exit', '/old/path');
+      const oldPty = getPty(manager, id);
+
+      const restart = manager.restartSession(id, '/new/path');
+      oldPty._emitExit(0);
+      await restart;
+
+      expect(onExit).not.toHaveBeenCalled();
+      expect(manager.sessions.get(id).alive).toBe(true);
+    });
+
+    it('restartSession does not resurrect a session killed while waiting for the old pty exit', async () => {
+      const id = manager.openSession('restart-killed', '/old/path');
+      const oldPty = getPty(manager, id);
+      mockPtyModule.spawn.mockClear();
+
+      const restart = manager.restartSession(id, '/new/path');
+      await Promise.resolve();
+
+      manager.kill(id);
+      oldPty._emitExit(0);
+      const result = await restart;
+
+      expect(result).toBeNull();
+      expect(mockPtyModule.spawn).not.toHaveBeenCalled();
+      expect(manager.sessions.has(id)).toBe(false);
+    });
+
+    it('restartSession does not overwrite a session reopened by another caller while waiting', async () => {
+      const id = manager.openSession('restart-reopened', '/old/path');
+      const oldPty = getPty(manager, id);
+      mockPtyModule.spawn.mockClear();
+
+      const restart = manager.restartSession(id, '/new/path');
+      await Promise.resolve();
+
+      manager.openSession(id, '/manual/path');
+      const manualEntry = manager.sessions.get(id);
+      oldPty._emitExit(0);
+      const result = await restart;
+
+      expect(result).toBeNull();
+      expect(mockPtyModule.spawn).toHaveBeenCalledTimes(1);
+      expect(manager.sessions.get(id)).toBe(manualEntry);
+      expect(manager.sessions.get(id).cwd).toBe('/manual/path');
+    });
+
     it('falls back to homedir when spawn with bad cwd fails', async () => {
       mockPtyModule.spawn.mockClear();
       let callCount = 0;

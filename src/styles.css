@@ -653,8 +653,8 @@ body {
   bottom: 6px;
   right: 8px;
   background: none;
-  border: none;
-  padding: 3px;
+  border: 1px solid transparent;
+  padding: 2px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -662,7 +662,14 @@ body {
   opacity: 0.45;
   cursor: pointer;
   border-radius: 4px;
-  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+}
+
+.session-item.active-list-item .session-cwd {
+  color: var(--yellow);
+  opacity: 0.9;
+  background: none;
+  border-color: transparent;
 }
 
 .session-cwd-icon {
@@ -672,12 +679,34 @@ body {
   pointer-events: none;
 }
 
-.session-cwd:hover,
-.session-cwd:focus-visible {
-  opacity: 0.95;
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+.session-cwd:hover {
+  opacity: 1;
+  color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 16%, transparent);
+  border-color: color-mix(in srgb, var(--yellow) 42%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--yellow) 14%, transparent);
   outline: none;
+}
+
+.session-item.active-list-item .session-cwd:hover {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.session-cwd:focus-visible {
+  opacity: 1;
+  color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 16%, transparent);
+  border-color: color-mix(in srgb, var(--yellow) 48%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--yellow) 48%, transparent);
+  outline-offset: 1px;
+}
+
+.session-item.active-list-item .session-cwd:focus-visible {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .session-cwd:active {

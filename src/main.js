@@ -323,7 +323,7 @@ if (!hasSingleInstanceLock) {
     return result.filePaths[0];
   });
 
-  // IPC: Change working directory of a session (save + kill + respawn)
+  // IPC: Change working directory of a session (save + clean restart)
   const cwdChangingSessions = new Set();
   ipcMain.handle('session:changeCwd', async (event, sessionId, cwd) => {
     sessionId = requireValidSessionId(sessionId);
@@ -336,8 +336,7 @@ if (!hasSingleInstanceLock) {
     statusService.invalidateSession(sessionId);
     cwdChangingSessions.add(sessionId);
     try {
-      ptyManager.kill(sessionId);
-      return ptyManager.openSession(sessionId, cwd, launcher);
+      return await ptyManager.restartSession(sessionId, cwd, launcher);
     } catch (error) {
       if (!previousCwd) {
         await sessionService.clearCwd(sessionId);

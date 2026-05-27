@@ -4,6 +4,27 @@ All notable changes to DeepSky are documented here.
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-05-27
+
+### Added
+- **Copy-last-prompt button** — small copy icon at the right end of the SESSION CONTEXT bar copies the full prompt with toast confirmation.
+- **GitHub repository links are first-class resources** — visible GitHub repo links such as `https://github.com/itsela-ms/DeepSky` now appear as Repo resources alongside Azure DevOps repo links, with sentence punctuation trimmed and malformed traversal-shaped paths ignored.
+
+### Changed
+- **Related resources are stricter** — the Session Status resource list now auto-indexes only top-level visible user/assistant resource mentions, instead of treating tool arguments, tool output/search results, or sub-agent chatter as related.
+- **Active-list directory icon is easier to see** — session cards in the Active list now use an outline-only yellow working-directory icon instead of leaving it as a faint grey affordance.
+- **Sidebar and terminal rendering are calmer** — session switches repaint once, idle redraw flicker is suppressed, resize noise no longer keeps cards busy, and collapsed group dots use clearer colors.
+- **Sidebar folder icon redesigned** — the prior "📁 + truncated path" row underneath each session title is replaced with a small monochrome folder icon in the bottom-right corner of the card. Click opens the folder picker, same as before.
+- **Tab strip mirrors sidebar order** — Ctrl+Tab now cycles in the order the sidebar shows (drag-reorderable and persisted), not in raw resolution order.
+
+### Fixed
+- **Ctrl+W actually closes sessions again** — closing a tab now disposes the underlying pty/session as well as the tab UI; sidebar stays in sync.
+- **Changing CWD via the folder button no longer crashes the session** — DeepSky now waits for the old PTY to exit before resuming the same session in the new directory, and suppresses the intentional restart exit event.
+- **New session is scrollable from the first frame** — fixes a race where the terminal wasn't yet attached when initial output arrived, leaving the scrollback at the bottom with no way to scroll up until `/restart`.
+- **`Working` vs `Waiting` badges reflect reality** — Working flips to Waiting within ~2s of the last substantive output from the agent, instead of after the previous ~39s polling decay. The new debounce ignores ambient ANSI noise (cursor blinks, idle redraws) so the badge no longer flickers when nothing is happening.
+- **`Pending PR` is now correct** — only fires when the *latest* assistant message contains a PR URL (GitHub `/pull/N` or Azure DevOps `/pullrequest/N`), not whenever any historical PR was ever mentioned in the session.
+- **`Ctrl+W` no longer triggers `Uncaught Exception` dialogs** — the per-close `where copilot.exe` shellout now runs without a stdin pipe and is cached for the process lifetime, eliminating the intermittent EPIPE.
+
 ## [1.2.2-beta.1] - 2026-05-24
 
 ### Fixed

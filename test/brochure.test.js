@@ -134,6 +134,12 @@ describeIfBrochure('Interactive mock reflects features', () => {
     expect(brochure).toContain('mb-idle');
   });
 
+  it('mock shows the outline-only Active-list working-directory affordance', () => {
+    expect(brochure).toContain('mock-session-cwd');
+    expect(brochure).toMatch(/\.mock-session-cwd\s*\{[\s\S]*?color:\s*var\(--yellow\)/);
+    expect(brochure).toMatch(/\.mock-session-cwd\s*\{[\s\S]*?background:\s*none/);
+  });
+
   it('mock has tab bar', () => {
     expect(brochure).toContain('mock-tabbar');
     expect(brochure).toContain('tabBar');
