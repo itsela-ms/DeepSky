@@ -26,9 +26,12 @@ describe('release metadata regressions', () => {
     expect(mainSource).toMatch(/second-instance/);
   });
 
-  it('documents Windows-only installation', () => {
-    expect(readme).not.toMatch(/macOS Installer/i);
-    expect(readme).not.toMatch(/\.dmg/i);
+  it('documents macOS installation alongside Windows', () => {
+    // README used to gate on Windows-only; with the macOS DMG build added,
+    // both platforms must appear so users can find their installer.
+    expect(readme).toMatch(/macOS/);
+    expect(readme).toMatch(/\.dmg/i);
+    expect(readme).toMatch(/Windows Installer/i);
   });
 
   it('documents the actual Windows installer filename', () => {

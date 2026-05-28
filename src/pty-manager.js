@@ -3,11 +3,23 @@ const path = require('path');
 const fs = require('fs');
 
 const os = require('os');
-const { isValidSessionId } = require('./app-support');
+const { isValidSessionId, buildAugmentedPath } = require('./app-support');
 
 // Default to node-pty, but allow injection for testing
 let defaultPty;
 try { defaultPty = require('node-pty'); } catch { defaultPty = null; }
+
+// Build the env used for every PTY spawn. On macOS we augment PATH so
+// children (copilot, node, git, etc.) resolve even when the app was launched
+// from Finder/Dock with the minimal launchd PATH. On Windows / Linux PATH is
+// already inherited correctly so we just pass it through.
+function _buildSpawnEnv(baseEnv = process.env) {
+  const env = { ...baseEnv, TERM: 'xterm-256color' };
+  if (process.platform === 'darwin') {
+    env.PATH = buildAugmentedPath(env.PATH || '');
+  }
+  return env;
+}
 
 const DEFAULT_SESSION_STATE_DIR = path.join(os.homedir(), '.copilot', 'session-state');
 // The Copilot CLI normally creates its session-state folder within ~1–3s on a
@@ -148,7 +160,7 @@ class PtyManager extends EventEmitter {
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
+        env: _buildSpawnEnv()
       });
     } catch (err) {
       // If spawn fails with given cwd, retry with homedir
@@ -162,7 +174,7 @@ class PtyManager extends EventEmitter {
             cols: 120,
             rows: 40,
             cwd: os.homedir(),
-            env: { ...process.env, TERM: 'xterm-256color' }
+            env: _buildSpawnEnv()
           });
         } catch (err2) {
           throw new Error(`Failed to spawn PTY for session ${sessionId}: ${err2.message}`);
@@ -242,7 +254,7 @@ class PtyManager extends EventEmitter {
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
+        env: _buildSpawnEnv()
       });
     } catch (err) {
       if (cwd && cwd !== os.homedir()) {
@@ -255,7 +267,7 @@ class PtyManager extends EventEmitter {
             cols: 120,
             rows: 40,
             cwd: os.homedir(),
-            env: { ...process.env, TERM: 'xterm-256color' }
+            env: _buildSpawnEnv()
           });
         } catch (err2) {
           throw new Error(`Failed to spawn PTY: ${err2.message}`);
@@ -389,7 +401,7 @@ class PtyManager extends EventEmitter {
         cols: 120,
         rows: 40,
         cwd: spawnCwd,
-        env: { ...process.env, TERM: 'xterm-256color' }
+        env: _buildSpawnEnv()
       });
     } catch {
       // Pre-warm failed — cold start will still work
