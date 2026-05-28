@@ -53,31 +53,53 @@ async function run({ pty: injectedPty, shellPath, timeoutMs = 15000 } = {}) {
 
   // Step 2: locate spawn-helper relative to node-pty and verify it's executable
   // (mac/linux only; Windows uses ConPTY and ships no helper).
+  //
+  // CRITICAL: when packaged, require.resolve('node-pty') returns an asar-virtual
+  // path like ".../app.asar/node_modules/node-pty/lib/index.js". fs.statSync()
+  // on a path INSIDE the asar returns the IN-ARCHIVE file mode (644 — the
+  // original, untouched), NOT the on-disk file under app.asar.unpacked/ that
+  // our afterPack hook chmodded to 755. node-pty actually exec()s the unpacked
+  // file, so the unpacked file's mode is what matters. We therefore translate
+  // any asar-prefixed candidate to its asar.unpacked twin and prefer that.
   if (process.platform !== 'win32') {
     try {
       const nodePtyDir = path.dirname(require.resolve('node-pty'));
-      // node-pty's bin lives at <root>/lib/index.js; helper lives at <root>/build/Release
-      // for prebuilds it's at <root>/prebuilds/<platform>-<arch>/spawn-helper.
-      // Search both common locations.
-      const candidates = [
+      const baseCandidates = [
         path.join(nodePtyDir, '..', 'build', 'Release', 'spawn-helper'),
         path.join(nodePtyDir, '..', 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'),
       ];
-      let found = null;
-      for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) { found = candidate; break; }
+      const toUnpacked = (p) => p.replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
+      // Expand each base to [unpackedTwin, original]. Unpacked twin is checked
+      // first because it's the real on-disk file that exec() will load.
+      const candidates = [];
+      for (const c of baseCandidates) {
+        const u = toUnpacked(c);
+        if (u !== c) candidates.push(u);
+        candidates.push(c);
       }
-      if (!found) {
-        log('error', 'spawn-helper not found', { candidates });
-        return false;
+      // Disable asar virtualization for the duration of stat() calls so we get
+      // real on-disk metadata instead of in-archive metadata.
+      const prevNoAsar = process.noAsar;
+      process.noAsar = true;
+      try {
+        let found = null;
+        for (const candidate of candidates) {
+          if (fs.existsSync(candidate)) { found = candidate; break; }
+        }
+        if (!found) {
+          log('error', 'spawn-helper not found', { candidates });
+          return false;
+        }
+        const stat = fs.statSync(found);
+        const mode = stat.mode & 0o777;
+        if ((mode & 0o111) === 0) {
+          log('error', 'spawn-helper not executable', { found, mode: mode.toString(8) });
+          return false;
+        }
+        log('info', 'spawn-helper ok', { found, mode: mode.toString(8) });
+      } finally {
+        process.noAsar = prevNoAsar;
       }
-      const stat = fs.statSync(found);
-      const mode = stat.mode & 0o777;
-      if ((mode & 0o111) === 0) {
-        log('error', 'spawn-helper not executable', { found, mode: mode.toString(8) });
-        return false;
-      }
-      log('info', 'spawn-helper ok', { found, mode: mode.toString(8) });
     } catch (err) {
       log('error', 'spawn-helper probe failed', { message: err && err.message });
       return false;
