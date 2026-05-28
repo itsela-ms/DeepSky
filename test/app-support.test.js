@@ -45,6 +45,7 @@ describe('app-support', () => {
         execSync,
         existsSync,
         env: { APPDATA: 'C:\\Users\\dev\\AppData\\Roaming' },
+        platform: 'win32',
       });
       expect(info).toEqual({
         path: 'C:\\Users\\dev\\AppData\\Roaming\\agency\\CurrentVersion\\agency.exe',
@@ -62,7 +63,10 @@ describe('app-support', () => {
     });
   });
 
-  describe('resolveBrochureInfo', () => {
+  // resolveBrochureInfo builds Windows-style paths (`C:\\Docs\\...`) through
+  // path.join, which is non-portable. These tests assert that exact Windows
+  // string form, so they're inherently Windows-only. Skip on POSIX CI runners.
+  describe.skipIf(process.platform !== 'win32')('resolveBrochureInfo', () => {
     it('prefers the documents brochure when present', () => {
       const existsSync = vi.fn((file) => file === 'C:\\Docs\\deepsky-brochure.html');
       expect(resolveBrochureInfo({
