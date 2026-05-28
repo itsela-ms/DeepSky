@@ -5,6 +5,7 @@
 Stop juggling session IDs. DeepSky gives you a sleek desktop app to manage, search, and switch between all your Copilot CLI sessions — so you can focus on building, not bookkeeping.
 
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
+![macOS](https://img.shields.io/badge/platform-macOS_(Apple_Silicon)-black)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
@@ -53,7 +54,29 @@ Copilot CLI is powerful, but managing sessions is painful. You're copying UUIDs,
 2. Run the installer — installs to your user profile with a Start Menu entry
 3. Launch DeepSky from the Start Menu
 
-> **Prerequisite:** [GitHub Copilot CLI](https://github.com/github/copilot-cli) — `winget install github.copilot`
+> **Prerequisite:** [GitHub Copilot CLI](https://github.com/github/copilot-cli) — `winget install GitHub.Copilot`
+
+### macOS (Apple Silicon)
+
+> **Status:** unsigned build. Works on M1/M2/M3 Macs (arm64). Intel Macs (x64) not yet shipped — see [#13](https://github.com/itsela-ms/DeepSky/issues) for status.
+
+1. Download `DeepSky-x.x.x-mac-arm64.dmg` from [**Releases**](https://github.com/itsela-ms/DeepSky/releases)
+2. Open the DMG and drag **DeepSky** into `/Applications`
+3. **First launch** — because the app is unsigned, Gatekeeper will block it. Either:
+   - **Right-click → Open** on `DeepSky.app`, then click **Open** in the dialog (one-time bypass), OR
+   - From Terminal, remove the quarantine attribute:
+     ```bash
+     xattr -d com.apple.quarantine /Applications/DeepSky.app
+     ```
+4. Launch DeepSky from Launchpad
+
+> **Prerequisite:** [GitHub Copilot CLI](https://github.com/github/copilot-cli) — pick one:
+> ```bash
+> brew install copilot-cli           # Homebrew (recommended)
+> npm install -g @github/copilot     # npm
+> curl -fsSL https://gh.io/copilot-install | bash   # install script
+> ```
+> DeepSky auto-discovers `copilot` in `/opt/homebrew/bin`, `/usr/local/bin`, and `~/.local/bin`, plus any directory in your login-shell `$PATH` (so asdf, nvm, volta, etc. all just work).
 
 ### From Source
 

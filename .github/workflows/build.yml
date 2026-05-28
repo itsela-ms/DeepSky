@@ -4,13 +4,15 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -38,8 +40,86 @@ jobs:
             release/*.blockmap
           if-no-files-found: warn
 
+  build-mac:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      # CSC_IDENTITY_AUTO_DISCOVERY=false ensures electron-builder doesn't try
+      # to find a code-signing identity in the runner keychain (we have none,
+      # and silent searching can produce confusing errors). `identity: null`
+      # in package.json gives us an ad-hoc signed app, which Gatekeeper still
+      # blocks without right-click → Open. Users are guided through this in
+      # the README.
+      - run: npm run dist:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # The whole point of this CI job: prove the *packaged* app actually runs
+      # on a real macOS runner. Without this, a green build only means files
+      # got produced — it doesn't mean PTY sessions work. We:
+      #   1. mount the produced DMG,
+      #   2. copy DeepSky.app out (mounted volumes are read-only and Electron
+      #      needs to write app caches),
+      #   3. exec the main process with --smoke-test (defined in src/smoke-test.js),
+      #   4. assert exit code 0 + key markers in stdout.
+      # If this fails, the artifact is broken and the PR should not be merged.
+      - name: Smoke-test packaged .app from DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG_PATH=$(ls release/DeepSky-*-mac-arm64.dmg | head -n 1)
+          echo "Testing $DMG_PATH"
+          MOUNT_DIR=$(mktemp -d -t deepsky-dmg)
+          # hdiutil attach prints the mounted volume path on its last column
+          ATTACH_OUTPUT=$(hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_DIR" "$DMG_PATH")
+          echo "$ATTACH_OUTPUT"
+          APP_IN_DMG=$(ls -d "$MOUNT_DIR"/DeepSky.app)
+          WORK_APP="$RUNNER_TEMP/DeepSky.app"
+          rm -rf "$WORK_APP"
+          cp -R "$APP_IN_DMG" "$WORK_APP"
+          hdiutil detach "$MOUNT_DIR"
+
+          # Verify spawn-helper is executable inside the packaged .app (this
+          # is what afterPack fixed; ensure it stayed fixed through DMG layout)
+          for HELPER in "$WORK_APP"/Contents/Resources/app.asar.unpacked/node_modules/node-pty/prebuilds/*/spawn-helper; do
+            ls -l "$HELPER"
+            test -x "$HELPER" || { echo "FAIL: $HELPER is not executable"; exit 1; }
+          done
+
+          # Run the smoke test through the Electron main binary; the
+          # --smoke-test branch in main.js exits before any window is shown.
+          # `2>&1` so smoke-test.js's [smoke-test] log lines land in the CI log.
+          DEEPSKY_SMOKE_TEST=1 "$WORK_APP/Contents/MacOS/DeepSky" --smoke-test 2>&1 | tee smoke.log
+          # smoke-test.js exits 0/1 based on PTY_OK marker
+          grep -q "result: PTY echoed PTY_OK" smoke.log || \
+            grep -q "after echoing PTY_OK" smoke.log || \
+            { echo "FAIL: smoke test did not see PTY_OK"; exit 1; }
+          echo "Smoke test PASSED"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macOS
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build-windows, build-mac]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 

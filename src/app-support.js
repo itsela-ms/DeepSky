@@ -14,6 +14,20 @@ const SAFE_COMMAND_NAME_RE = /^[a-zA-Z0-9._-]+$/;
 const _commandPathCache = new Map();
 function _clearCommandPathCache() { _commandPathCache.clear(); }
 
+// Cached login-shell PATH on macOS. Apps launched from Finder/Dock get the
+// minimal launchd PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) which is missing
+// `/opt/homebrew/bin`, `~/.local/bin`, `$(npm prefix -g)/bin`, asdf/nvm/volta
+// shims — i.e. exactly where users actually install the copilot CLI. So once,
+// at startup, we shell out to the user's login shell and ask it to print PATH
+// after their dotfiles have run. Result is stored here and used by
+// buildAugmentedPath().
+let _loginShellPath = null;
+let _loginShellPathProbed = false;
+function _clearLoginShellPathCache() {
+  _loginShellPath = null;
+  _loginShellPathProbed = false;
+}
+
 function isValidSessionId(sessionId) {
   return typeof sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(sessionId);
 }
@@ -24,7 +38,12 @@ function resolveCommandPath({
   fallbackCommand,
   execSyncImpl,
   existsSync = fs.existsSync,
+  platform = process.platform,
 }) {
+  // On Windows we use `where <bin>`; on POSIX (darwin/linux) we use `command -v <bin>`
+  // via /bin/sh so we don't depend on the user's shell. Both swallow exit code 1
+  // (not-found) via try/catch.
+  const isWin = platform === 'win32';
   for (const bin of names) {
     if (!SAFE_COMMAND_NAME_RE.test(bin)) continue;
     try {
@@ -33,7 +52,13 @@ function resolveCommandPath({
       // Node's parent-side cleanup wrote its end-of-stream marker. The empty
       // try/catch above only catches synchronous throws — the EPIPE was
       // surfacing as an Electron uncaughtException dialog.
-      const result = execSyncImpl(`where ${bin}`, {
+      const cmd = isWin
+        ? `where ${bin}`
+        // /bin/sh -c "command -v <bin>" is POSIX, prints absolute path on stdout
+        // for executable on PATH, exits 1 if not found. We pipe through `head -n 1`
+        // for parity with the where-style "first hit only" behavior.
+        : `/bin/sh -c 'command -v ${bin} 2>/dev/null | head -n 1'`;
+      const result = execSyncImpl(cmd, {
         encoding: 'utf8',
         timeout: 5000,
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -54,6 +79,23 @@ function resolveCommandPath({
   return { path: fallbackCommand, found: false };
 }
 
+function _macPosixCandidates(env, binName) {
+  // Order matters: probe the locations most likely to hold a real, working
+  // binary first so we exit early and skip slower disk checks.
+  // /opt/homebrew/bin is Apple-Silicon Homebrew, /usr/local/bin is Intel
+  // Homebrew + npm-global default, ~/.local/bin is the install-script default
+  // for non-root users (`gh.io/copilot-install`).
+  // Use path.posix.join so this produces forward-slash paths even when the
+  // unit tests run on Windows (path.join would emit /Users\dev\.local\bin/...).
+  const home = env.HOME || '';
+  return [
+    `/opt/homebrew/bin/${binName}`,
+    `/usr/local/bin/${binName}`,
+    home ? path.posix.join(home, '.local', 'bin', binName) : '',
+    `/usr/bin/${binName}`,
+  ];
+}
+
 function resolveCopilotPath(deps = {}) {
   return resolveCopilotInfo(deps).path;
 }
@@ -65,16 +107,29 @@ function resolveCopilotInfo(deps = {}) {
   }
   const { execSync } = deps.execSync ? deps : require('child_process');
   const env = deps.env || process.env;
-  const result = resolveCommandPath({
-    names: ['copilot.exe', 'copilot.cmd'],
-    candidates: [
+  const platform = deps.platform || process.platform;
+
+  let names;
+  let candidates;
+  if (platform === 'win32') {
+    names = ['copilot.exe', 'copilot.cmd'];
+    candidates = [
       path.join(env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'copilot.exe'),
       path.join(env.LOCALAPPDATA || '', 'Programs', 'copilot-cli', 'copilot.exe'),
       path.join(env.PROGRAMFILES || '', 'GitHub Copilot CLI', 'copilot.exe'),
-    ],
+    ];
+  } else {
+    names = ['copilot'];
+    candidates = _macPosixCandidates(env, 'copilot');
+  }
+
+  const result = resolveCommandPath({
+    names,
+    candidates,
     fallbackCommand: 'copilot',
     execSyncImpl: execSync,
     existsSync: deps.existsSync || fs.existsSync,
+    platform,
   });
   if (cacheable) _commandPathCache.set('copilot', result);
   return result;
@@ -87,18 +142,127 @@ function resolveAgencyInfo(deps = {}) {
   }
   const { execSync } = deps.execSync ? deps : require('child_process');
   const env = deps.env || process.env;
-  const result = resolveCommandPath({
-    names: ['agency.exe', 'agency.cmd'],
-    candidates: [
+  const platform = deps.platform || process.platform;
+
+  let names;
+  let candidates;
+  if (platform === 'win32') {
+    names = ['agency.exe', 'agency.cmd'];
+    candidates = [
       path.join(env.APPDATA || '', 'agency', 'CurrentVersion', 'agency.exe'),
       path.join(env.LOCALAPPDATA || '', 'agency', 'CurrentVersion', 'agency.exe'),
-    ],
+    ];
+  } else {
+    names = ['agency'];
+    candidates = _macPosixCandidates(env, 'agency');
+  }
+
+  const result = resolveCommandPath({
+    names,
+    candidates,
     fallbackCommand: 'agency',
     execSyncImpl: execSync,
     existsSync: deps.existsSync || fs.existsSync,
+    platform,
   });
   if (cacheable) _commandPathCache.set('agency', result);
   return result;
+}
+
+// Probe the user's login shell PATH on macOS. Cached for process lifetime.
+// `execSync` injectable for tests; returns the PATH string (may be empty),
+// or null if probing isn't applicable / failed.
+function getLoginShellPath(deps = {}) {
+  const platform = deps.platform || process.platform;
+  if (platform !== 'darwin') return null;
+  if (_loginShellPathProbed && !deps.execSync) return _loginShellPath;
+
+  const { execSync } = deps.execSync ? deps : require('child_process');
+  const env = deps.env || process.env;
+  const shell = env.SHELL || '/bin/zsh';
+  // Only allow well-known shells — we're piping this into a shell invocation
+  // so resist any chance of injection via $SHELL.
+  const ALLOWED_SHELLS = new Set([
+    '/bin/zsh', '/bin/bash', '/bin/sh', '/bin/dash', '/bin/ksh',
+    '/usr/local/bin/zsh', '/usr/local/bin/bash',
+    '/opt/homebrew/bin/zsh', '/opt/homebrew/bin/bash',
+  ]);
+  const safeShell = ALLOWED_SHELLS.has(shell) ? shell : '/bin/zsh';
+  let result = null;
+  try {
+    const out = execSync(`${safeShell} -l -c 'printf %s "$PATH"'`, {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    result = (out || '').trim() || null;
+  } catch {
+    result = null;
+  }
+  if (!deps.execSync) {
+    _loginShellPath = result;
+    _loginShellPathProbed = true;
+  }
+  return result;
+}
+
+// Compose an augmented PATH for spawning subprocesses on macOS. Prepends the
+// user's login-shell PATH and known install dirs so spawned children can
+// always find `copilot`, `node`, `git`, `brew` etc. — even when the app was
+// launched from Finder/Dock with the minimal launchd PATH. No-op on Windows
+// (PATH is already correct there) and on Linux (where Finder-equivalent
+// launchers tend to inherit a usable PATH; user can install copilot to
+// /usr/local/bin/ or ~/.local/bin/ both already standard).
+function buildAugmentedPath(currentPath, deps = {}) {
+  const platform = deps.platform || process.platform;
+  if (platform !== 'darwin') return currentPath || '';
+
+  const env = deps.env || process.env;
+  const sep = ':';
+  const segments = [];
+  const loginPath = getLoginShellPath({ ...deps, platform });
+  if (loginPath) segments.push(loginPath);
+  // Hardcoded fallback dirs in case login shell didn't yield anything (e.g.,
+  // user uses fish but we wouldn't shell out to it). Order matches the
+  // candidate priority in _macPosixCandidates. Use path.posix.join so tests
+  // running on Windows still produce forward-slash POSIX paths.
+  const home = env.HOME || '';
+  segments.push('/opt/homebrew/bin');
+  segments.push('/usr/local/bin');
+  if (home) segments.push(path.posix.join(home, '.local', 'bin'));
+  segments.push('/usr/bin');
+  segments.push('/bin');
+  if (currentPath) segments.push(currentPath);
+
+  // De-dupe while preserving order so the highest-priority hit wins.
+  const seen = new Set();
+  const merged = [];
+  for (const segment of segments) {
+    if (!segment) continue;
+    for (const dir of segment.split(sep)) {
+      if (!dir || seen.has(dir)) continue;
+      seen.add(dir);
+      merged.push(dir);
+    }
+  }
+  return merged.join(sep);
+}
+
+// Called once at app startup from src/main.js BEFORE any module reads
+// process.env.PATH or resolves the copilot/agency binaries. Mutates
+// process.env.PATH in place on macOS so the rest of the app sees a
+// "Terminal-like" PATH. On other platforms it's a no-op.
+function bootstrapMacEnvironment(deps = {}) {
+  const platform = deps.platform || process.platform;
+  if (platform !== 'darwin') return { mutated: false };
+  const env = deps.env || process.env;
+  const before = env.PATH || '';
+  const augmented = buildAugmentedPath(before, { ...deps, env, platform });
+  if (augmented && augmented !== before) {
+    env.PATH = augmented;
+    return { mutated: true, before, after: augmented };
+  }
+  return { mutated: false, before, after: before };
 }
 
 function resolveBrochureInfo(deps = {}) {
@@ -178,7 +342,10 @@ function calculateNotificationPosition(workArea, activeCount) {
 }
 
 module.exports = {
+  bootstrapMacEnvironment,
+  buildAugmentedPath,
   calculateNotificationPosition,
+  getLoginShellPath,
   isValidSessionId,
   pickNotificationDisplay,
   resolveCommandPath,
@@ -187,4 +354,5 @@ module.exports = {
   resolveCopilotInfo,
   resolveCopilotPath,
   _clearCommandPathCache,
+  _clearLoginShellPathCache,
 };

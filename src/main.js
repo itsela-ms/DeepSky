@@ -2,6 +2,40 @@ const { app, BrowserWindow, ipcMain, shell, Menu, dialog, clipboard, screen } = 
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const {
+  bootstrapMacEnvironment,
+  calculateNotificationPosition,
+  isValidSessionId,
+  pickNotificationDisplay,
+  resolveAgencyInfo,
+  resolveBrochureInfo,
+  resolveCopilotInfo,
+  resolveCopilotPath,
+} = require('./app-support');
+
+// CRITICAL ORDERING: must run BEFORE any module-level code reads PATH or
+// resolves copilot/agency binaries. On macOS, GUI launches from Finder/Dock
+// inherit a minimal launchd PATH that lacks /opt/homebrew/bin, ~/.local/bin,
+// etc. — so without this, resolveCopilotPath() below would fail to find
+// `copilot` and node-pty spawns would fail with ENOENT for `node`/`git`/etc.
+// On Windows this is a no-op.
+bootstrapMacEnvironment();
+
+// --- Smoke test mode (used by CI to verify the packaged .app actually runs).
+// Triggered by `--smoke-test` arg or DEEPSKY_SMOKE_TEST=1 env var.
+// Loads node-pty, spawns /bin/zsh -lc 'echo PTY_OK', waits for the marker,
+// then exits with 0 on success / 1 on failure. Runs BEFORE app.whenReady so
+// no window is created and the process self-terminates cleanly.
+if (process.argv.includes('--smoke-test') || process.env.DEEPSKY_SMOKE_TEST === '1') {
+  require('./smoke-test').run().then((ok) => {
+    process.exit(ok ? 0 : 1);
+  }).catch((err) => {
+    console.error('[smoke-test] crashed:', err && err.stack || err);
+    process.exit(1);
+  });
+  return;
+}
+
 const SessionService = require('./session-service');
 const PtyManager = require('./pty-manager');
 const TagIndexer = require('./tag-indexer');
@@ -17,15 +51,6 @@ const {
   resolveSessionDirectory,
   resolveSessionFilesDirectory,
 } = require('./session-paths');
-const {
-  calculateNotificationPosition,
-  isValidSessionId,
-  pickNotificationDisplay,
-  resolveAgencyInfo,
-  resolveBrochureInfo,
-  resolveCopilotInfo,
-  resolveCopilotPath,
-} = require('./app-support');
 const { getNewSessionAvailability } = require('./session-state');
 
 // Prevent Chromium GPU compositing artifacts(rectangular patches of wrong shade on dark backgrounds)
