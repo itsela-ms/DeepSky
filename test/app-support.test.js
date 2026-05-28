@@ -38,7 +38,11 @@ describe('app-support', () => {
   });
 
   describe('resolveAgencyInfo', () => {
-    it('detects agency from a known install location', () => {
+    // Constructs candidates via path.join(env.APPDATA, ...) which uses the
+    // host separator — on macOS path.join produces mixed slashes that won't
+    // match the Windows-style existsSync mock. Skip on POSIX; the darwin
+    // equivalent is covered in `darwin command path resolution` below.
+    it.skipIf(process.platform !== 'win32')('detects agency from a known install location', () => {
       const execSync = vi.fn(() => { throw new Error('missing'); });
       const existsSync = vi.fn((file) => file === 'C:\\Users\\dev\\AppData\\Roaming\\agency\\CurrentVersion\\agency.exe');
       const info = resolveAgencyInfo({
