@@ -177,6 +177,13 @@ describeIfBrochure('Interactive mock reflects features', () => {
   });
 });
 
+describeIfBrochure('Motion accessibility', () => {
+  it('honors reduced-motion preferences for CSS and scripted mock animation', () => {
+    expect(brochure).toMatch(/prefers-reduced-motion:\s*reduce/);
+    expect(brochure).toMatch(/matchMedia\(['"]\(prefers-reduced-motion:\s*reduce\)['"]\)/);
+  });
+});
+
 describeIfBrochure('Keyboard shortcuts section', () => {
   it('has a keyboard shortcuts section', () => {
     expect(brochure).toMatch(/Keyboard Shortcuts/i);

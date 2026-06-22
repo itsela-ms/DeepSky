@@ -36,8 +36,38 @@ describe('index.html accessibility regressions', () => {
     expect(html).toContain('id="startup-loading-screen"');
     expect(html).toContain('id="startup-loading-title"');
     expect(html).toContain('id="startup-loading-message"');
+    expect(html).toContain('id="startup-loading-progress"');
+    expect(html).toContain('id="startup-loading-progress-bar"');
+    expect(html).toContain('id="startup-loading-progress-label"');
     expect(html).toMatch(/role="status"/);
+    expect(html).toMatch(/role="progressbar"/);
     expect(html).toMatch(/aria-live="polite"/);
+  });
+
+  it('exposes one custom launcher argument field in settings', () => {
+    expect(html).toContain('id="copilot-args"');
+    expect(html).toContain('aria-labelledby="copilot-args-title"');
+    expect(html).not.toContain('id="agency-copilot-args"');
+    expect(html).not.toContain('aria-labelledby="agency-args-title"');
+    expect(html).toContain('agency copilot');
+    expect(html).toContain('--agent squad');
+  });
+
+  it('labels the copy-on-select toggle for assistive technology', () => {
+    expect(html).toContain('id="copy-on-select-title"');
+    expect(html).toContain('aria-labelledby="copy-on-select-title"');
+    expect(html).toContain('aria-describedby="copy-on-select-desc"');
+  });
+
+  it('labels the agency launcher toggle for assistive technology', () => {
+    expect(html).toContain('id="agency-launcher-title"');
+    expect(html).toContain('aria-labelledby="agency-launcher-title"');
+    expect(html).toContain('aria-describedby="agency-launcher-desc"');
+  });
+
+  it('does not hide the visible session context from assistive technology', () => {
+    const promptGhost = html.match(/<div id="terminal-prompt-ghost"[^>]*>/)?.[0] || '';
+    expect(promptGhost).not.toContain('aria-hidden');
   });
 
   it('surfaces recent release notes and a full changelog action in the About tab', () => {

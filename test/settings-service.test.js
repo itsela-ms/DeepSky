@@ -35,6 +35,10 @@ describe('SettingsService', () => {
       expect(svc.get().useAgencyCopilot).toBe(false);
     });
 
+    it('custom launcher args default to empty strings', () => {
+      expect(svc.get().copilotArgs).toBe('');
+    });
+
     it('statusPanelSections defaults to null', () => {
       expect(svc.get().statusPanelSections).toBeNull();
     });
@@ -66,6 +70,14 @@ describe('SettingsService', () => {
       const svc2 = new SettingsService(tmpDir);
       await svc2.load();
       expect(svc2.get().useAgencyCopilot).toBe(true);
+    });
+
+    it('persists custom launcher args across load', async () => {
+      await svc.update({ copilotArgs: '--agent squad' });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().copilotArgs).toBe('--agent squad');
+      expect(svc2.get().agencyCopilotArgs).toBeUndefined();
     });
 
     it('persists statusPanelSections across load', async () => {
@@ -110,6 +122,22 @@ describe('SettingsService', () => {
       await svc.load();
       expect(svc.get().maxConcurrent).toBe(3);
       expect(svc.get().promptForWorkdir).toBe(false); // default fills in
+    });
+
+    it('migrates malformed launcher args and removes the old agency-specific setting on load', async () => {
+      const configPath = path.join(tmpDir, 'session-gui-settings.json');
+      await fs.promises.writeFile(configPath, JSON.stringify({
+        copilotArgs: '--model "gpt',
+        agencyCopilotArgs: '--agent squad',
+      }), 'utf8');
+
+      await svc.load();
+
+      expect(svc.get().copilotArgs).toBe('');
+      expect(svc.get().agencyCopilotArgs).toBeUndefined();
+      const saved = JSON.parse(await fs.promises.readFile(configPath, 'utf8'));
+      expect(saved.copilotArgs).toBe('');
+      expect(saved.agencyCopilotArgs).toBeUndefined();
     });
   });
 

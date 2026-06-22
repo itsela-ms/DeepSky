@@ -132,8 +132,72 @@ body {
   color: var(--text-dim);
 }
 
+.startup-loading-progress {
+  height: 6px;
+  margin-top: 18px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-overlay);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+
+.startup-loading-progress.hidden {
+  display: none;
+}
+
+.startup-loading-progress.hidden + .startup-loading-progress-label {
+  display: none;
+}
+
+.startup-loading-progress-bar {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--teal));
+  transition: width 0.25s ease;
+}
+
+.startup-loading-progress.indeterminate .startup-loading-progress-bar {
+  width: 42%;
+  animation: startup-progress-indeterminate 1.1s ease-in-out infinite;
+}
+
+.startup-loading-progress-label {
+  min-height: 17px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 @keyframes startup-spin {
   to { transform: rotate(360deg); }
+}
+
+@keyframes startup-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(260%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-loading-spinner,
+  .startup-loading-progress.indeterminate .startup-loading-progress-bar {
+    animation: none;
+  }
+
+  .startup-loading-progress-bar {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .startup-loading-progress {
+    background: Canvas;
+    border-color: CanvasText;
+  }
+
+  .startup-loading-progress-bar {
+    background: Highlight;
+  }
 }
 
 /* Title bar */
@@ -1157,57 +1221,6 @@ body {
   font-style: italic;
 }
 
-/* Copy-last-prompt button — sits at the right end of the SESSION CONTEXT bar. */
-.terminal-prompt-ghost .prompt-copy-btn {
-  flex-shrink: 0;
-  margin-left: 8px;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: color-mix(in srgb, var(--text-dim) 80%, var(--text));
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, transform 80ms ease;
-}
-
-.terminal-prompt-ghost .prompt-copy-btn:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: color-mix(in srgb, var(--accent) 90%, white);
-  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
-}
-
-.terminal-prompt-ghost .prompt-copy-btn:focus-visible {
-  outline: none;
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
-}
-
-.terminal-prompt-ghost .prompt-copy-btn:active {
-  transform: scale(0.92);
-}
-
-.terminal-prompt-ghost .prompt-copy-btn.copied {
-  background: color-mix(in srgb, var(--green, #a6e3a1) 22%, transparent);
-  color: var(--green, #a6e3a1);
-  border-color: color-mix(in srgb, var(--green, #a6e3a1) 40%, transparent);
-}
-
-.terminal-prompt-ghost .prompt-copy-btn.copied .prompt-copy-icon::before {
-  content: '✓';
-}
-
-.terminal-prompt-ghost .prompt-copy-icon {
-  display: inline-block;
-  pointer-events: none;
-}
-
 /* xterm scrollbar — explicit styling so it's always visible and themed */
 .xterm .xterm-viewport::-webkit-scrollbar {
   width: 10px;
@@ -2043,6 +2056,11 @@ body {
   transition: transform 0.2s;
 }
 
+.toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .toggle-switch input:checked + .toggle-slider {
   background: var(--accent);
 }
@@ -2106,6 +2124,24 @@ body {
   outline: none;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.settings-input-row input[type="text"]:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.settings-args-row {
+  margin-top: -4px;
+  margin-bottom: 12px;
+}
+
+.settings-input-row.disabled {
+  opacity: 0.5;
+}
+
+.settings-input-row.disabled input {
+  cursor: not-allowed;
 }
 
 .settings-input-row input[type="text"][readonly] {

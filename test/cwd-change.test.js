@@ -13,7 +13,7 @@ describe('session working-directory changes', () => {
     expect(end).toBeGreaterThan(start);
 
     const body = mainSource.slice(start, end);
-    expect(body).toContain('await ptyManager.restartSession(sessionId, cwd, launcher)');
+    expect(body).toMatch(/await ptyManager\.restartSession\(sessionId,\s*cwd,\s*launcher(?:,\s*launcherArgs)?\)/);
     expect(body).not.toMatch(/ptyManager\.kill\(sessionId\)[\s\S]*ptyManager\.openSession\(sessionId,\s*cwd,\s*launcher\)/);
   });
 });

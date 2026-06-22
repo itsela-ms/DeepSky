@@ -3,11 +3,9 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Regression tests for two related v1.2.x improvements:
+ * Regression tests for v1.2.x session context/status behavior:
  *
- *   1. Copy-last-prompt button in the SESSION CONTEXT bar
- *      (`#terminal-prompt-ghost`).
- *   2. Status indicator overhaul:
+ *   1. Status indicator overhaul:
  *        - "Working → Waiting" transition is now driven by a per-session
  *          debounce timer that fires ~1.2 s after the last pty:data chunk,
  *          instead of the previous ~39 s polling decay.
@@ -20,79 +18,10 @@ const path = require('path');
  */
 
 const rendererPath = path.join(__dirname, '..', 'src', 'renderer.js');
-const preloadPath = path.join(__dirname, '..', 'src', 'preload.js');
-const mainPath = path.join(__dirname, '..', 'src', 'main.js');
 const cssPath = path.join(__dirname, '..', 'src', 'styles.css');
-const indexHtmlPath = path.join(__dirname, '..', 'src', 'index.html');
 
 const renderer = fs.readFileSync(rendererPath, 'utf8');
-const preload = fs.readFileSync(preloadPath, 'utf8');
-const main = fs.readFileSync(mainPath, 'utf8');
 const css = fs.readFileSync(cssPath, 'utf8');
-const indexHtml = fs.readFileSync(indexHtmlPath, 'utf8');
-
-describe('copy-last-prompt button in the SESSION CONTEXT bar', () => {
-  it('IPC accepts a { full } option for getLastUserPrompt end-to-end', () => {
-    // preload forwards the options argument
-    expect(preload).toMatch(
-      /getLastUserPrompt:\s*\(sessionId,\s*options\)\s*=>\s*ipcRenderer\.invoke\(['"]session:getLastUserPrompt['"],\s*sessionId,\s*options\)/
-    );
-    // main accepts and forwards the options argument
-    expect(main).toMatch(
-      /ipcMain\.handle\(\s*['"]session:getLastUserPrompt['"][\s\S]*?async\s*\(event,\s*sessionId,\s*options\)[\s\S]*?sessionService\.getLastUserPrompt\(sessionId,\s*options\)/
-    );
-  });
-
-  it('updateSessionPromptGhost renders a .prompt-copy-btn with a data-session-id', () => {
-    const m = renderer.match(/function updateSessionPromptGhost[\s\S]*?\n\}/);
-    expect(m, 'updateSessionPromptGhost body must be findable').not.toBeNull();
-    const body = m[0];
-    // The button is rendered into the prompt-ghost innerHTML
-    expect(body).toMatch(/prompt-copy-btn/);
-    // The session id is captured at render time (rubber-duck: avoid copying
-    // the wrong session if activeSessionId changes between render and click)
-    expect(body).toMatch(/data-session-id=["']?\$\{(?:esc\()?sessionId/);
-    // Button is only shown when there's actually a lastPrompt to copy
-    const promptBranchIdx = body.indexOf('if (lastPrompt)');
-    const copyBtnIdx = body.indexOf('prompt-copy-btn');
-    expect(promptBranchIdx).toBeGreaterThan(-1);
-    expect(copyBtnIdx).toBeGreaterThan(promptBranchIdx);
-  });
-
-  it('wires the copy click via event delegation on the stable prompt-ghost parent', () => {
-    // Event delegation is required because innerHTML is rewritten on every
-    // ghost update, so a direct listener would be wiped.
-    expect(renderer).toMatch(
-      /terminalPromptGhost\.addEventListener\(['"]click['"][\s\S]*?\.closest\(['"]\.prompt-copy-btn['"]\)/
-    );
-  });
-
-  it('copy handler reads sessionId from the button (not activeSessionId) and calls copyText with the full prompt', () => {
-    const m = renderer.match(/terminalPromptGhost\.addEventListener\(['"]click['"][\s\S]*?\n\s*\}\);/);
-    expect(m, 'click delegation handler must be findable').not.toBeNull();
-    const body = m[0];
-    expect(body).toMatch(/btn\.dataset\.sessionId/);
-    expect(body).toMatch(/getLastUserPrompt\(sessionId,\s*\{\s*full:\s*true\s*\}\)/);
-    expect(body).toMatch(/copyText\(/);
-    // The handler should not blindly read activeSessionId — that's the
-    // exact race we're guarding against.
-    expect(body).not.toMatch(/activeSessionId\b/);
-  });
-
-  it('prompt-ghost is no longer aria-hidden (now contains an interactive button)', () => {
-    // Earlier the bar was aria-hidden="true" because it was purely
-    // decorative; adding an interactive button means it must be exposed.
-    expect(indexHtml).toMatch(/id="terminal-prompt-ghost" class="terminal-prompt-ghost"\s*>/);
-    expect(indexHtml).not.toMatch(/id="terminal-prompt-ghost"[^>]*aria-hidden=/);
-  });
-
-  it('CSS defines a .prompt-copy-btn inside the prompt-ghost with hover/focus/copied states', () => {
-    expect(css).toMatch(/\.terminal-prompt-ghost\s+\.prompt-copy-btn\s*\{/);
-    expect(css).toMatch(/\.terminal-prompt-ghost\s+\.prompt-copy-btn:hover/);
-    expect(css).toMatch(/\.terminal-prompt-ghost\s+\.prompt-copy-btn:focus-visible/);
-    expect(css).toMatch(/\.terminal-prompt-ghost\s+\.prompt-copy-btn\.copied/);
-  });
-});
 
 describe('per-session debounce timer makes Working → Waiting near-instant', () => {
   it('declares a sessionBusyTimers Map and tuned constants', () => {
@@ -430,8 +359,8 @@ describe('Pending PR fires only for the latest assistant.message', () => {
 });
 
 describe('SESSION CONTEXT bar has a fixed (not min-) height so fit() stays correct', () => {
-  // Bug: when the bar was `min-height: 28px` it grew from 28px to ~32px when
-  // populated with a prompt + the 22px copy button. fitAddon.fit() runs on
+  // Bug: when the bar was `min-height: 28px` it grew after prompt population.
+  // fitAddon.fit() runs on
   // session switch BEFORE scheduleSessionPromptGhostRefresh populates the
   // bar — so the terminal viewport was computed against a 28px bar but the
   // actual rendered bar took ~32px, hiding the bottom row(s) of output

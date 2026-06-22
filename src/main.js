@@ -7,6 +7,7 @@ const {
   calculateNotificationPosition,
   isValidSessionId,
   pickNotificationDisplay,
+  parseLauncherArgs,
   resolveAgencyInfo,
   resolveBrochureInfo,
   resolveCopilotInfo,
@@ -142,6 +143,11 @@ function getNewSessionSupport(settings) {
   return getNewSessionAvailability(getAugmentedSettings(settings));
 }
 
+function getLauncherArgsText(settings) {
+  const value = settings.copilotArgs;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function requireValidSessionId(sessionId) {
   if (!isValidSessionId(sessionId)) {
     throw new Error('Invalid session ID.');
@@ -235,7 +241,7 @@ if (!hasSingleInstanceLock) {
 
   const copilotExe = settingsService.get().copilotPath || COPILOT_PATH;
   sessionService = new SessionService(SESSION_STATE_DIR);
-  ptyManager = new PtyManager(copilotExe, settingsService);
+  ptyManager = new PtyManager(copilotExe, settingsService, undefined, { agencyPath: resolveAgencyInfo().path });
 
   tagIndexer = new TagIndexer(SESSION_STATE_DIR);
   await tagIndexer.init();
@@ -294,11 +300,12 @@ if (!hasSingleInstanceLock) {
   // IPC: Open/resume a session
   ipcMain.handle('session:open', async (event, sessionId) => {
     sessionId = requireValidSessionId(sessionId);
-    const [cwd, launcher] = await Promise.all([
+    const [cwd, launcher, launcherArgs] = await Promise.all([
       sessionService.getCwd(sessionId),
       sessionService.getLauncher(sessionId),
+      sessionService.getLauncherArgs(sessionId),
     ]);
-    return ptyManager.openSession(sessionId, cwd || undefined, launcher);
+    return ptyManager.openSession(sessionId, cwd || undefined, launcher, launcherArgs);
   });
 
   // IPC: Start a new session
@@ -315,11 +322,13 @@ if (!hasSingleInstanceLock) {
     }
 
     const launcher = sessionSupport.launcher;
+    const launcherArgs = getLauncherArgsText(settingsService.get(), launcher);
     // Try pre-warmed standby for instant startup
     const claimed = ptyManager.claimStandby(cwd || undefined, launcher);
     if (claimed) {
       if (cwd) await sessionService.saveCwd(claimed.id, cwd);
       await sessionService.saveLauncher(claimed.id, launcher);
+      await sessionService.saveLauncherArgs(claimed.id, launcherArgs);
       scheduleWarmUp();
       return {
         sessionId: claimed.id,
@@ -328,11 +337,12 @@ if (!hasSingleInstanceLock) {
     }
 
     // Cold start fallback
-    const sessionId = await ptyManager.newSession(cwd || undefined, launcher);
+    const sessionId = await ptyManager.newSession(cwd || undefined, launcher, [], launcherArgs);
     if (cwd) {
       await sessionService.saveCwd(sessionId, cwd);
     }
     await sessionService.saveLauncher(sessionId, launcher);
+    await sessionService.saveLauncherArgs(sessionId, launcherArgs);
     scheduleWarmUp();
     return { sessionId, bufferedData: '' };
   });
@@ -356,12 +366,15 @@ if (!hasSingleInstanceLock) {
       throw new Error('Invalid working directory.');
     }
     const previousCwd = await sessionService.getCwd(sessionId);
-    const launcher = await sessionService.getLauncher(sessionId);
+    const [launcher, launcherArgs] = await Promise.all([
+      sessionService.getLauncher(sessionId),
+      sessionService.getLauncherArgs(sessionId),
+    ]);
     await sessionService.saveCwd(sessionId, cwd);
     statusService.invalidateSession(sessionId);
     cwdChangingSessions.add(sessionId);
     try {
-      return await ptyManager.restartSession(sessionId, cwd, launcher);
+      return await ptyManager.restartSession(sessionId, cwd, launcher, launcherArgs);
     } catch (error) {
       if (!previousCwd) {
         await sessionService.clearCwd(sessionId);
@@ -370,7 +383,7 @@ if (!hasSingleInstanceLock) {
       }
       statusService.invalidateSession(sessionId);
       try {
-        ptyManager.openSession(sessionId, previousCwd, launcher);
+        ptyManager.openSession(sessionId, previousCwd, launcher, launcherArgs);
       } catch (restoreError) {
         error.message = `${error.message} (failed to restore previous session: ${restoreError.message})`;
       }
@@ -406,9 +419,15 @@ if (!hasSingleInstanceLock) {
     if (sanitized.useAgencyCopilot && !resolveAgencyInfo().found) {
       sanitized.useAgencyCopilot = false;
     }
+    if ('copilotArgs' in sanitized) {
+      sanitized.copilotArgs = typeof sanitized.copilotArgs === 'string' ? sanitized.copilotArgs.trim() : '';
+      parseLauncherArgs(sanitized.copilotArgs);
+    }
+    delete sanitized.agencyCopilotArgs;
+    const launchSettingsChanged = 'useAgencyCopilot' in sanitized || 'defaultWorkdir' in sanitized || 'promptForWorkdir' in sanitized || 'copilotArgs' in sanitized;
     const updated = await settingsService.update(sanitized);
-    ptyManager.updateSettings(updated);
-    if ('useAgencyCopilot' in sanitized || 'defaultWorkdir' in sanitized || 'promptForWorkdir' in sanitized) {
+    ptyManager.updateSettings(updated, launchSettingsChanged);
+    if (launchSettingsChanged) {
       scheduleWarmUp();
     }
 
@@ -513,8 +532,10 @@ if (!hasSingleInstanceLock) {
         throw new Error(sessionSupport.reason);
       }
       const launcher = sessionSupport.launcher;
-      const sessionId = await ptyManager.newSession(undefined, launcher, ['-i', oneLineCommand]);
+      const launcherArgs = getLauncherArgsText(settingsService.get(), launcher);
+      const sessionId = await ptyManager.newSession(undefined, launcher, ['-i', oneLineCommand], launcherArgs);
       await sessionService.saveLauncher(sessionId, launcher);
+      await sessionService.saveLauncherArgs(sessionId, launcherArgs);
       scheduleWarmUp();
 
       return { sessionId, backup };

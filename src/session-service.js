@@ -4,6 +4,7 @@ const yaml = require('js-yaml');
 const readline = require('readline');
 const { readPreferredSessionCwd } = require('./session-cwd');
 const { HISTORY_SESSION_LIMIT, getHistoryScopeCutoff } = require('./history-limit');
+const { parseLauncherArgs } = require('./app-support');
 class SessionService {
   constructor(sessionStateDir) {
     this.dir = sessionStateDir;
@@ -743,6 +744,16 @@ class SessionService {
     );
   }
 
+  async saveLauncherArgs(sessionId, argsText) {
+    const sessionDir = this._getSessionDir(sessionId);
+    await fs.promises.mkdir(sessionDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(sessionDir, '.deepsky-launcher-args'),
+      typeof argsText === 'string' ? argsText.trim() : '',
+      'utf8'
+    );
+  }
+
   async getLauncher(sessionId) {
     const sessionDir = this._getSessionDir(sessionId);
     try {
@@ -750,6 +761,24 @@ class SessionService {
       return this._normalizeLauncher(launcher);
     } catch {}
     return 'copilot';
+  }
+
+  async getLauncherArgs(sessionId) {
+    const sessionDir = this._getSessionDir(sessionId);
+    const argsPath = path.join(sessionDir, '.deepsky-launcher-args');
+    let argsText;
+    try {
+      argsText = (await fs.promises.readFile(argsPath, 'utf8')).trim();
+    } catch (error) {
+      return '';
+    }
+    try {
+      parseLauncherArgs(argsText);
+      return argsText;
+    } catch {
+      await fs.promises.rm(argsPath, { force: true }).catch(() => {});
+    }
+    return '';
   }
 
   async renameSession(sessionId, title) {

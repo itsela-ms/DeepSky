@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { parseLauncherArgs } = require('./app-support');
 
 const DEFAULTS = {
   maxConcurrent: 5,
@@ -19,6 +20,8 @@ const DEFAULTS = {
   promptForWorkdir: false, // show directory picker when creating a new session
   defaultWorkdir: '', // default working directory for new sessions; empty = user home
   useAgencyCopilot: false, // launch new sessions via `agency copilot` instead of the default copilot command
+  copilotArgs: '', // extra args passed to the selected launcher for new sessions
+  copyOnSelect: true, // automatically copy terminal text to clipboard when selected with the mouse
   autoUpdateEnabled: true, // false = no update checks or downloads
   updateChannel: 'stable', // 'stable' | 'beta'
 };
@@ -34,10 +37,34 @@ class SettingsService {
       const data = await fs.promises.readFile(this.configPath, 'utf8');
       const saved = JSON.parse(data);
       this.settings = { ...DEFAULTS, ...saved };
+      if (this._normalizeLauncherArgsSettings()) {
+        await this.save();
+      }
     } catch {
       this.settings = { ...DEFAULTS };
     }
     return this.settings;
+  }
+
+  _normalizeLauncherArgsSettings() {
+    let changed = false;
+    if (typeof this.settings.copilotArgs !== 'string') {
+      this.settings.copilotArgs = DEFAULTS.copilotArgs;
+      changed = true;
+    } else {
+      this.settings.copilotArgs = this.settings.copilotArgs.trim();
+      try {
+        parseLauncherArgs(this.settings.copilotArgs);
+      } catch {
+        this.settings.copilotArgs = DEFAULTS.copilotArgs;
+        changed = true;
+      }
+    }
+    if ('agencyCopilotArgs' in this.settings) {
+      delete this.settings.agencyCopilotArgs;
+      changed = true;
+    }
+    return changed;
   }
 
   async save() {

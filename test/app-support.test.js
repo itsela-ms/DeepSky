@@ -4,6 +4,7 @@ const {
   calculateNotificationPosition,
   isValidSessionId,
   pickNotificationDisplay,
+  parseLauncherArgs,
   resolveCommandPath,
   resolveAgencyInfo,
   resolveBrochureInfo,
@@ -64,6 +65,16 @@ describe('app-support', () => {
         path: 'agency',
         found: false,
       });
+    });
+
+    it('does not resolve agency through PATH/current-directory lookup on Windows', () => {
+      const execSync = vi.fn(() => 'C:\\repo\\agency.cmd\r\n');
+      const existsSync = vi.fn(() => false);
+      expect(resolveAgencyInfo({ execSync, existsSync, env: {}, platform: 'win32' })).toEqual({
+        path: 'agency',
+        found: false,
+      });
+      expect(execSync).not.toHaveBeenCalled();
     });
   });
 
@@ -141,6 +152,34 @@ describe('app-support', () => {
       expect(execSync).toHaveBeenCalledTimes(1);
       const [, opts] = execSync.mock.calls[0];
       expect(opts).toMatchObject({ stdio: ['ignore', 'pipe', 'ignore'] });
+    });
+  });
+
+  describe('parseLauncherArgs', () => {
+    it('splits launcher args while preserving quoted values', () => {
+      expect(parseLauncherArgs('--agent squad --label "red team" --flag=value')).toEqual([
+        '--agent',
+        'squad',
+        '--label',
+        'red team',
+        '--flag=value',
+      ]);
+    });
+
+    it('keeps Windows paths intact instead of treating backslash as an escape', () => {
+      expect(parseLauncherArgs('--config C:\\Tools\\agency.json')).toEqual(['--config', 'C:\\Tools\\agency.json']);
+    });
+
+    it('preserves explicitly quoted empty arguments', () => {
+      expect(parseLauncherArgs('--flag ""')).toEqual(['--flag', '']);
+    });
+
+    it('rejects unclosed quotes', () => {
+      expect(() => parseLauncherArgs('--agent "squad')).toThrow(/unclosed quote/);
+    });
+
+    it('rejects shell control characters', () => {
+      expect(() => parseLauncherArgs('--agent squad & whoami')).toThrow(/shell control/);
     });
   });
 

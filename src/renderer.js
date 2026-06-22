@@ -61,6 +61,8 @@ const sessionPromptGhostState = new Map();
 let statusDiffPopover = null;
 let statusDiffHideTimer = null;
 let historyShowsAll = false;
+let startupInstallInProgress = false;
+let startupInstallRecoveryPromise = null;
 
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 450;
@@ -120,41 +122,6 @@ const searchClear = document.getElementById('search-clear');
 const sidebarSearchToggle = document.getElementById('sidebar-search-toggle');
 const terminalContainer = document.getElementById('terminal-container');
 const terminalPromptGhost = document.getElementById('terminal-prompt-ghost');
-// Event delegation for the copy-last-prompt button inside the prompt ghost.
-// The button is recreated via innerHTML on every prompt-ghost render, so we
-// can't bind directly to it — delegate on the stable parent element. We
-// capture the sessionId from the button's data-attribute (set at render
-// time) so an in-flight activeSessionId change can't cause us to copy the
-// wrong session's prompt.
-if (terminalPromptGhost) {
-  terminalPromptGhost.addEventListener('click', async (e) => {
-    const btn = e.target.closest('.prompt-copy-btn');
-    if (!btn) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const sessionId = btn.dataset.sessionId;
-    if (!sessionId) return;
-    if (btn.dataset.copying === '1') return;
-    btn.dataset.copying = '1';
-    btn.classList.add('copying');
-    try {
-      const text = await window.api.getLastUserPrompt(sessionId, { full: true });
-      if (!text) {
-        showToast({ type: 'info', title: 'Nothing to copy', body: 'No previous user prompt found for this session.' });
-        return;
-      }
-      await window.api.copyText(text);
-      btn.classList.remove('copying');
-      btn.classList.add('copied');
-      setTimeout(() => btn.classList.remove('copied'), 1500);
-      showToast({ type: 'success', title: 'Prompt copied', body: text.length > 80 ? text.slice(0, 77) + '…' : text });
-    } catch (err) {
-      showToast({ type: 'error', title: 'Copy failed', body: String(err?.message || err) });
-    } finally {
-      delete btn.dataset.copying;
-    }
-  });
-}
 const sessionSearch = document.getElementById('session-search');
 const sessionSearchInput = document.getElementById('session-search-input');
 const sessionSearchCount = document.getElementById('session-search-count');
@@ -170,6 +137,7 @@ const btnNew = document.getElementById('btn-new');
 const btnNewCenter = document.getElementById('btn-new-center');
 const maxConcurrentInput = document.getElementById('max-concurrent');
 const useAgencyCopilotInput = document.getElementById('use-agency-copilot');
+const copilotArgsInput = document.getElementById('copilot-args');
 const promptWorkdirInput = document.getElementById('prompt-workdir');
 const defaultWorkdirInput = document.getElementById('default-workdir');
 const btnPickDefaultWorkdir = document.getElementById('btn-pick-default-workdir');
@@ -200,8 +168,12 @@ const startupLoading = createStartupLoadingController({
   screen: document.getElementById('startup-loading-screen'),
   title: document.getElementById('startup-loading-title'),
   message: document.getElementById('startup-loading-message'),
+  progress: document.getElementById('startup-loading-progress'),
+  progressBar: document.getElementById('startup-loading-progress-bar'),
+  progressLabel: document.getElementById('startup-loading-progress-label'),
 });
 const autoUpdateToggle = document.getElementById('auto-update-enabled');
+const copyOnSelectToggle = document.getElementById('copy-on-select');
 const betaChannelToggle = document.getElementById('beta-channel');
 const betaChannelLabel = document.getElementById('beta-channel-label');
 const betaChannelRow = document.getElementById('beta-channel-row');
@@ -283,9 +255,11 @@ async function restoreMostRecentClosedTab() {
 function applySettingsToControls(settings, { includeSidebar = false } = {}) {
   window._cachedSettings = { ...(window._cachedSettings || {}), ...settings };
   maxConcurrentInput.value = settings.maxConcurrent;
+  if (copilotArgsInput) copilotArgsInput.value = settings.copilotArgs || '';
   promptWorkdirInput.checked = !!settings.promptForWorkdir;
   defaultWorkdirInput.value = settings.defaultWorkdir || '';
   autoUpdateToggle.checked = settings.autoUpdateEnabled !== false;
+  copyOnSelectToggle.checked = settings.copyOnSelect !== false;
   betaChannelToggle.checked = settings.updateChannel === 'beta';
   betaChannelRow.classList.toggle('disabled', !autoUpdateToggle.checked);
   betaChannelToggle.disabled = !autoUpdateToggle.checked;
@@ -301,6 +275,62 @@ function applySettingsToControls(settings, { includeSidebar = false } = {}) {
     sidebarCollapsedBeforeHidden = sidebarState.sidebarCollapsed;
     syncSidebarCollapsedUi();
   }
+}
+
+function getUpdateVersionLabel(info) {
+  return info?.version ? `v${info.version}` : 'the downloaded update';
+}
+
+function showStartupUpdateInstallStatus(data, progressPercent = 12) {
+  const versionLabel = getUpdateVersionLabel(data?.info);
+  startupLoading.setStatus({
+    titleText: 'Installing DeepSky update...',
+    messageText: `Applying ${versionLabel}. DeepSky will reopen when installation completes.`,
+    progressPercent,
+    progressText: 'Preparing installer...',
+    indeterminate: true,
+  });
+}
+
+async function installPendingUpdateOnStartup() {
+  const updateData = await window.api.getUpdateStatus();
+  if (updateData?.status !== 'pending-install') return false;
+
+  startupInstallInProgress = true;
+  showStartupUpdateInstallStatus(updateData);
+  const installResult = await window.api.installUpdate();
+  if (!startupInstallInProgress || installResult?.status === 'error') return false;
+  showStartupUpdateInstallStatus(updateData, 35);
+  return true;
+}
+
+function waitForStartupPaint() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+async function completeStartupLoading(startupResult) {
+  if (startupResult === 'installing-update' || startupInstallInProgress) return;
+  await waitForStartupPaint();
+  startupLoading.complete();
+}
+
+function recoverFromStartupInstallError(errorMessage) {
+  if (startupInstallRecoveryPromise) return;
+  startupInstallInProgress = false;
+  startupLoading.setStatus({
+    titleText: 'Opening current DeepSky version...',
+    messageText: errorMessage
+      ? `Update installation failed: ${errorMessage}`
+      : 'Update installation failed. Opening the current version instead.',
+  });
+
+  startupInstallRecoveryPromise = Promise.resolve()
+    .then(() => init())
+    .then(completeStartupLoading)
+    .catch((error) => {
+      console.error('DeepSky startup failed after update install error', error);
+      startupLoading.fail(error);
+    });
 }
 
 function getActiveTerminalEntry() {
@@ -497,10 +527,6 @@ function updateSessionPromptGhost(sessionId) {
   if (lastPrompt) {
     html += `<span class="info-divider">│</span>`;
     html += `<span class="info-prompt" title="${esc(lastPrompt)}">💬 ${esc(lastPrompt)}</span>`;
-    // Copy button — placed at the right end. data-session-id locks in the
-    // session that was active at render-time so a later activeSessionId change
-    // can't make us copy the wrong session's prompt (rubber-duck race).
-    html += `<button class="prompt-copy-btn" type="button" data-session-id="${esc(sessionId)}" title="Copy last prompt" aria-label="Copy last user prompt to clipboard"><span class="prompt-copy-icon" aria-hidden="true">⧉</span></button>`;
   }
 
   terminalPromptGhost.innerHTML = html;
@@ -810,6 +836,15 @@ async function init() {
   const settings = await window.api.getSettings();
   applySettingsToControls(settings, { includeSidebar: true });
 
+  // Clean up any previous IPC listeners (guards against double-init on reload)
+  while (ipcCleanups.length) ipcCleanups.pop()();
+
+  // Register before the startup install gate so installer errors can surface on the loading screen.
+  ipcCleanups.push(window.api.onUpdateStatus(handleUpdateStatus));
+  if (await installPendingUpdateOnStartup()) {
+    return 'installing-update';
+  }
+
   // Restore last sidebar tab — must be set BEFORE refreshSessionList
   if (settings.lastActiveTab) {
     currentSidebarTab = settings.lastActiveTab;
@@ -823,9 +858,6 @@ async function init() {
     messageText: 'Preparing your sidebar and saved session history...',
   });
   await refreshSessionList();
-
-  // Clean up any previous IPC listeners (guards against double-init on reload)
-  while (ipcCleanups.length) ipcCleanups.pop()();
 
   ipcCleanups.push(window.api.onPtyData((sessionId, data) => {
     const entry = terminals.get(sessionId);
@@ -969,9 +1001,6 @@ async function init() {
     }
   });
 
-  // Update status listener (auto-update only, no manual button)
-  ipcCleanups.push(window.api.onUpdateStatus(handleUpdateStatus));
-
   // Theme switcher
   settingsOverlay.querySelectorAll('.theme-option').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1070,8 +1099,8 @@ async function init() {
   });
 
   document.addEventListener('click', (e) => {
-    if (!notificationPanel.classList.contains('hidden') && 
-        !notificationPanel.contains(e.target) && 
+    if (!notificationPanel.classList.contains('hidden') &&
+        !notificationPanel.contains(e.target) &&
         !e.target.closest('#btn-notifications')) {
       notificationPanel.classList.add('hidden');
     }
@@ -1361,6 +1390,7 @@ function handleUpdateStatus(data) {
   const statusEl = document.getElementById('update-status');
   const progressEl = document.getElementById('update-progress');
   const progressBar = document.getElementById('update-progress-bar');
+  if (!statusEl || !progressEl || !progressBar) return;
 
   statusEl.classList.remove('hidden');
   progressEl.classList.add('hidden');
@@ -1370,7 +1400,7 @@ function handleUpdateStatus(data) {
       statusEl.textContent = 'Checking for updates…';
       break;
     case 'available':
-      statusEl.textContent = `Downloading v${data.info?.version}…`;
+      statusEl.textContent = `Downloading ${getUpdateVersionLabel(data.info)}…`;
       statusEl.className = 'update-status';
       setUpdateBadge(true, data.info?.version, false);
       break;
@@ -1385,13 +1415,28 @@ function handleUpdateStatus(data) {
       progressBar.style.width = `${data.progress?.percent || 0}%`;
       break;
     case 'downloaded':
-      statusEl.textContent = `v${data.info?.version} will be installed on next quit.`;
+      statusEl.textContent = `${getUpdateVersionLabel(data.info)} will be installed before DeepSky opens on next launch.`;
       statusEl.className = 'update-status update-available';
       setUpdateBadge(true, data.info?.version, true);
+      break;
+    case 'pending-install':
+      statusEl.textContent = `${getUpdateVersionLabel(data.info)} will be installed before DeepSky opens.`;
+      statusEl.className = 'update-status update-available';
+      setUpdateBadge(true, data.info?.version, false);
+      break;
+    case 'installing':
+      statusEl.textContent = `Installing ${getUpdateVersionLabel(data.info)}…`;
+      statusEl.className = 'update-status update-available';
+      progressEl.classList.remove('hidden');
+      progressBar.style.width = '35%';
+      if (startupInstallInProgress) showStartupUpdateInstallStatus(data, 35);
       break;
     case 'error':
       statusEl.textContent = `Update error: ${data.error}`;
       statusEl.className = 'update-status update-error';
+      if (startupInstallInProgress) {
+        recoverFromStartupInstallError(data.error);
+      }
       break;
     case 'idle':
       statusEl.classList.add('hidden');
@@ -1406,16 +1451,18 @@ function setUpdateBadge(show, version, notify) {
       badge = document.createElement('span');
       badge.id = 'update-badge';
       badge.className = 'update-badge';
+      badge.setAttribute('aria-hidden', 'true');
       btnSettings.appendChild(badge);
     }
     badge.textContent = '↑';
-    badge.title = `v${version} available`;
+    badge.title = version ? `v${version} available` : 'Update available';
     badge.classList.remove('hidden');
     if (notify) {
-      showToast({ type: 'info', title: 'Update ready', body: `v${version} downloaded — will apply next time you close DeepSky.` });
+      showToast({ type: 'info', title: 'Update ready', body: `${getUpdateVersionLabel({ version })} downloaded — will apply before DeepSky opens on next launch.` });
     }
   } else if (badge) {
     badge.classList.add('hidden');
+    badge.setAttribute('aria-hidden', 'true');
   }
 }
 
@@ -2570,6 +2617,31 @@ function createTerminal(sessionId) {
     scheduleTerminalViewportSync(sessionId);
   });
 
+  // Copy-on-select: mirror the active selection to the clipboard, matching
+  // PuTTY/Windows Terminal behavior. Two sources must be handled:
+  //   1. xterm's own selection (Shift+drag, or when the app has no mouse mode)
+  //      → terminal.getSelection(), surfaced via onSelectionChange.
+  //   2. The native DOM selection produced by a plain click+drag while the
+  //      embedded CLI has mouse-reporting on. In that mode xterm forwards mouse
+  //      events to the PTY and its own selection stays empty, but the DOM
+  //      renderer's text still gets a browser selection. We capture that on
+  //      mouseup via window.getSelection().
+  // Both are gated on the setting and skip empty selections so a plain click
+  // doesn't clobber the clipboard.
+  terminal.onSelectionChange(() => {
+    if (window._cachedSettings?.copyOnSelect === false) return;
+    const selection = terminal.getSelection();
+    if (selection) window.api.copyText(selection);
+  });
+
+  wrapper.addEventListener('mouseup', () => {
+    if (window._cachedSettings?.copyOnSelect === false) return;
+    // xterm's own selection (if any) is already handled by onSelectionChange.
+    if (terminal.hasSelection()) return;
+    const domSelection = window.getSelection()?.toString();
+    if (domSelection && domSelection.trim()) window.api.copyText(domSelection);
+  });
+
   // Defense-in-depth: suppress xterm's native paste handler.
   // Primary fix is in main.js (custom menu without 'paste' role), but this
   // catches any residual browser-level paste events that slip through.
@@ -2806,7 +2878,7 @@ function updateTabStatus(sessionId, alive) {
   const tab = document.querySelector(`.tab[data-session-id="${sessionId}"]`);
   if (tab) tab.style.opacity = alive ? '1' : '0.5';
 }
-
+
 // ───────────── Session Reordering ─────────────
 
 function ensureSessionOrder() {
@@ -4330,6 +4402,21 @@ useAgencyCopilotInput.addEventListener('change', async (e) => {
   applySettingsToControls(settings);
 });
 
+async function saveLauncherArgs(input, key) {
+  const nextValue = input.value.trim();
+  try {
+    const settings = await window.api.updateSettings({ [key]: nextValue });
+    applySettingsToControls(settings);
+  } catch (err) {
+    input.value = window._cachedSettings?.[key] || '';
+    showToast({ type: 'error', title: 'Invalid launcher arguments', body: String(err?.message || err) });
+  }
+}
+
+copilotArgsInput?.addEventListener('change', (e) => {
+  saveLauncherArgs(e.target, 'copilotArgs');
+});
+
 promptWorkdirInput.addEventListener('change', (e) => {
   window.api.updateSettings({ promptForWorkdir: e.target.checked });
 });
@@ -4353,6 +4440,11 @@ autoUpdateToggle.addEventListener('change', (e) => {
   betaChannelRow.classList.toggle('disabled', !e.target.checked);
   betaChannelToggle.disabled = !e.target.checked;
   window.api.applyUpdateSettings();
+});
+
+copyOnSelectToggle.addEventListener('change', (e) => {
+  window._cachedSettings = { ...(window._cachedSettings || {}), copyOnSelect: e.target.checked };
+  window.api.updateSettings({ copyOnSelect: e.target.checked });
 });
 
 betaChannelToggle.addEventListener('change', (e) => {
@@ -4598,10 +4690,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 init()
-  .then(async () => {
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    startupLoading.complete();
-  })
+  .then(completeStartupLoading)
   .catch((error) => {
     console.error('DeepSky startup failed', error);
     startupLoading.fail(error);

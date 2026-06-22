@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 
 const os = require('os');
-const { isValidSessionId, buildAugmentedPath } = require('./app-support');
+const { isValidSessionId, buildAugmentedPath, parseLauncherArgs, resolveAgencyInfo } = require('./app-support');
 
 // Default to node-pty, but allow injection for testing
 let defaultPty;
@@ -35,6 +35,9 @@ class PtyManager extends EventEmitter {
   constructor(copilotPath, settingsService, ptyModule, options = {}) {
     super();
     this.copilotPath = copilotPath;
+    this.agencyPath = options.agencyPath || resolveAgencyInfo().path || 'agency';
+    const windowsDir = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+    this._cmdPath = options.cmdPath || (process.platform === 'win32' ? path.join(windowsDir, 'System32', 'cmd.exe') : 'cmd.exe');
     this.sessions = new Map();
     this.settingsService = settingsService;
     this._pty = ptyModule || defaultPty;
@@ -42,7 +45,10 @@ class PtyManager extends EventEmitter {
     // On Windows, .cmd files must be spawned via cmd.exe
     this._useCmd = process.platform === 'win32' &&
       copilotPath.toLowerCase().endsWith('.cmd');
+    this._agencyUseCmd = process.platform === 'win32' &&
+      this.agencyPath.toLowerCase().endsWith('.cmd');
     this._standby = null;
+    this._warmUpGeneration = 0;
 
     // Pre-CLI-1.0.49, passing `--resume <fresh-uuid>` made the CLI silently
     // create a brand-new session at that exact UUID, which DeepSky relied on
@@ -66,18 +72,55 @@ class PtyManager extends EventEmitter {
     return this.settingsService?.get().useAgencyCopilot ? 'agency' : 'copilot';
   }
 
-  _spawnArgs(extraArgs, launcher) {
+  _launcherArgs(launcher, overrideArgsText) {
+    if (typeof overrideArgsText === 'string') {
+      return parseLauncherArgs(overrideArgsText);
+    }
+    const settings = this.settingsService?.get() || {};
+    return parseLauncherArgs(settings.copilotArgs || '');
+  }
+
+  _launcherArgsKey(launcher, overrideArgsText) {
+    return JSON.stringify(this._launcherArgs(launcher, overrideArgsText));
+  }
+
+  _ensureCmdSafeLauncherArgs(args) {
+    const unsafe = args.find(arg => /[%!]/.test(arg));
+    if (unsafe !== undefined) {
+      throw new Error('Custom launcher arguments for Windows command launchers cannot contain % or !.');
+    }
+  }
+
+  _standbyKey(cwd, launcher) {
     const resolvedLauncher = this._resolveLauncher(launcher);
+    return JSON.stringify({
+      cwd: cwd || os.homedir(),
+      launcher: resolvedLauncher,
+      args: this._launcherArgsKey(resolvedLauncher),
+    });
+  }
+
+  _spawnArgs(extraArgs, launcher, overrideArgsText) {
+    const resolvedLauncher = this._resolveLauncher(launcher);
+    const launcherArgs = this._launcherArgs(resolvedLauncher, overrideArgsText);
+    const allArgs = [...launcherArgs, ...extraArgs];
     if (resolvedLauncher === 'agency') {
-      if (process.platform === 'win32') {
-        return { file: 'cmd.exe', args: ['/c', 'agency', 'copilot', ...extraArgs], launcher: resolvedLauncher };
+      if (!path.isAbsolute(this.agencyPath)) {
+        throw new Error('Agency executable path is unavailable.');
       }
-      return { file: 'agency', args: ['copilot', ...extraArgs], launcher: resolvedLauncher };
+      if (this._agencyUseCmd) {
+        if (!path.isAbsolute(this._cmdPath)) throw new Error('Windows command processor path is unavailable.');
+        this._ensureCmdSafeLauncherArgs(launcherArgs);
+        return { file: this._cmdPath, args: ['/d', '/s', '/c', `"${this.agencyPath}"`, 'copilot', ...allArgs], launcher: resolvedLauncher };
+      }
+      return { file: this.agencyPath, args: ['copilot', ...allArgs], launcher: resolvedLauncher };
     }
     if (this._useCmd) {
-      return { file: 'cmd.exe', args: ['/c', this.copilotPath, ...extraArgs], launcher: resolvedLauncher };
+      if (!path.isAbsolute(this._cmdPath)) throw new Error('Windows command processor path is unavailable.');
+      this._ensureCmdSafeLauncherArgs(launcherArgs);
+      return { file: this._cmdPath, args: ['/c', this.copilotPath, ...allArgs], launcher: resolvedLauncher };
     }
-    return { file: this.copilotPath, args: extraArgs, launcher: resolvedLauncher };
+    return { file: this.copilotPath, args: allArgs, launcher: resolvedLauncher };
   }
 
   get maxConcurrent() {
@@ -132,7 +175,7 @@ class PtyManager extends EventEmitter {
     throw new Error('Timed out waiting for CLI session-state folder to appear');
   }
 
-  openSession(sessionId, cwd, launcher) {
+  openSession(sessionId, cwd, launcher, launcherArgsText = '') {
     // If already alive, just return the id
     if (this.sessions.has(sessionId) && this.sessions.get(sessionId).alive) {
       return sessionId;
@@ -152,7 +195,7 @@ class PtyManager extends EventEmitter {
       // `--resume <id>` depends on the CLI resume index, which can reject
       // local history folders. `--session-id` resumes local state by UUID and
       // keeps history cards reopenable even when that index is stale.
-      const spawnConfig = this._spawnArgs(['--session-id', sessionId, '--yolo'], launcher);
+      const spawnConfig = this._spawnArgs(['--session-id', sessionId, '--yolo'], launcher, launcherArgsText);
       launcher = spawnConfig.launcher;
       const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
@@ -166,7 +209,7 @@ class PtyManager extends EventEmitter {
       // If spawn fails with given cwd, retry with homedir
       if (cwd && cwd !== os.homedir()) {
         try {
-          const spawnConfig = this._spawnArgs(['--session-id', sessionId, '--yolo'], launcher);
+          const spawnConfig = this._spawnArgs(['--session-id', sessionId, '--yolo'], launcher, launcherArgsText);
           launcher = spawnConfig.launcher;
           const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {
@@ -193,7 +236,8 @@ class PtyManager extends EventEmitter {
       lastDataAt: null,
       dataBytesSinceIdle: 0,
       cwd: spawnCwd,
-      launcher: this._resolveLauncher(launcher)
+      launcher: this._resolveLauncher(launcher),
+      argsKey: this._launcherArgsKey(this._resolveLauncher(launcher), launcherArgsText)
     };
 
     ptyProcess.onData((data) => {
@@ -215,7 +259,7 @@ class PtyManager extends EventEmitter {
     return sessionId;
   }
 
-  async restartSession(sessionId, cwd, launcher) {
+  async restartSession(sessionId, cwd, launcher, launcherArgsText = '') {
     const entry = this.sessions.get(sessionId);
     if (entry?.alive) {
       await this._waitForExitAfterKill(entry);
@@ -227,14 +271,14 @@ class PtyManager extends EventEmitter {
       this.sessions.delete(sessionId);
     }
 
-    return this.openSession(sessionId, cwd, launcher);
+    return this.openSession(sessionId, cwd, launcher, launcherArgsText);
   }
 
-  newSession(cwd, launcher, extraArgs = []) {
-    return this._serializeSpawn(() => this._newSessionImpl(cwd, launcher, extraArgs));
+  newSession(cwd, launcher, extraArgs = [], launcherArgsText) {
+    return this._serializeSpawn(() => this._newSessionImpl(cwd, launcher, extraArgs, launcherArgsText));
   }
 
-  async _newSessionImpl(cwd, launcher, extraArgs = []) {
+  async _newSessionImpl(cwd, launcher, extraArgs = [], launcherArgsText) {
     this._evictIfNeeded();
 
     const spawnCwd = cwd || os.homedir();
@@ -246,7 +290,7 @@ class PtyManager extends EventEmitter {
     let ptyProcess;
     let resolvedLauncher;
     try {
-      const spawnConfig = this._spawnArgs(buildArgs, launcher);
+      const spawnConfig = this._spawnArgs(buildArgs, launcher, launcherArgsText);
       resolvedLauncher = spawnConfig.launcher;
       const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
@@ -259,7 +303,7 @@ class PtyManager extends EventEmitter {
     } catch (err) {
       if (cwd && cwd !== os.homedir()) {
         try {
-          const spawnConfig = this._spawnArgs(buildArgs, launcher);
+          const spawnConfig = this._spawnArgs(buildArgs, launcher, launcherArgsText);
           resolvedLauncher = spawnConfig.launcher;
           const { file, args } = spawnConfig;
           ptyProcess = this._pty.spawn(file, args, {
@@ -292,7 +336,8 @@ class PtyManager extends EventEmitter {
       lastDataAt: null,
       dataBytesSinceIdle: 0,
       cwd: spawnCwd,
-      launcher: resolvedLauncher
+      launcher: resolvedLauncher,
+      argsKey: this._launcherArgsKey(resolvedLauncher, launcherArgsText)
     };
 
     ptyProcess.onData((data) => {
@@ -382,19 +427,26 @@ class PtyManager extends EventEmitter {
   }
 
   async _warmUpImpl(cwd, launcher) {
-    if (this._standby && this._standby.alive) return;
-    this._standby = null;
+    const spawnCwd = cwd || os.homedir();
+    const resolvedLauncher = this._resolveLauncher(launcher);
+    const expectedKey = this._standbyKey(spawnCwd, resolvedLauncher);
+    const generation = this._warmUpGeneration;
+    if (this._standby && this._standby.alive) {
+      if (this._standby.standbyKey === expectedKey) return;
+      try { this._standby.pty.kill(); } catch {}
+      this._standby.alive = false;
+      this._standby = null;
+    }
 
     // Don't warm if at capacity
     const aliveCount = [...this.sessions.values()].filter(e => e.alive).length;
     if (aliveCount >= this.maxConcurrent) return;
 
-    const spawnCwd = cwd || os.homedir();
     const beforeSnapshot = await this._snapshotSessionFolders();
     let ptyProcess;
     let spawnConfig;
     try {
-      spawnConfig = this._spawnArgs(['--yolo'], launcher);
+      spawnConfig = this._spawnArgs(['--yolo'], resolvedLauncher);
       const { file, args } = spawnConfig;
       ptyProcess = this._pty.spawn(file, args, {
         name: 'xterm-256color',
@@ -418,11 +470,18 @@ class PtyManager extends EventEmitter {
       return;
     }
 
+    if (generation !== this._warmUpGeneration || expectedKey !== this._standbyKey(spawnCwd, resolvedLauncher)) {
+      try { ptyProcess.kill(); } catch {}
+      return;
+    }
+
     const entry = {
       id: sessionId,
       pty: ptyProcess,
       cwd: spawnCwd,
       launcher: spawnConfig.launcher,
+      argsKey: this._launcherArgsKey(spawnConfig.launcher),
+      standbyKey: expectedKey,
       bufferedData: [],
       alive: true,
       claimed: false
@@ -450,7 +509,9 @@ class PtyManager extends EventEmitter {
 
     const spawnCwd = cwd || os.homedir();
     const resolvedLauncher = this._resolveLauncher(launcher);
-    if (standby.cwd !== spawnCwd || standby.launcher !== resolvedLauncher) {
+    const argsKey = this._launcherArgsKey(resolvedLauncher);
+    const expectedKey = this._standbyKey(spawnCwd, resolvedLauncher);
+    if (standby.cwd !== spawnCwd || standby.launcher !== resolvedLauncher || standby.argsKey !== argsKey || standby.standbyKey !== expectedKey) {
       // CWD mismatch — discard standby
       try { standby.pty.kill(); } catch {}
       standby.alive = false;
@@ -470,7 +531,8 @@ class PtyManager extends EventEmitter {
       lastDataAt: standby.bufferedData.length > 0 ? Date.now() : null,
       dataBytesSinceIdle: 0,
       cwd: standby.cwd,
-      launcher: standby.launcher
+      launcher: standby.launcher,
+      argsKey: standby.argsKey
     };
 
     standby.pty.onData((data) => {
@@ -553,7 +615,9 @@ class PtyManager extends EventEmitter {
     return killed;
   }
 
-  updateSettings(settings) {
+  updateSettings(settings, launchSettingsChanged = true) {
+    if (!launchSettingsChanged) return;
+    this._warmUpGeneration += 1;
     const standby = this._standby;
     if (!standby || !standby.alive) return;
 
@@ -566,7 +630,8 @@ class PtyManager extends EventEmitter {
 
     const expectedLauncher = this._resolveLauncher(settings?.useAgencyCopilot ? 'agency' : 'copilot');
     const expectedCwd = settings?.defaultWorkdir || os.homedir();
-    if (standby.launcher !== expectedLauncher || standby.cwd !== expectedCwd) {
+    const expectedArgsKey = this._launcherArgsKey(expectedLauncher);
+    if (standby.launcher !== expectedLauncher || standby.cwd !== expectedCwd || standby.argsKey !== expectedArgsKey) {
       try { standby.pty.kill(); } catch {}
       standby.alive = false;
       this._standby = null;

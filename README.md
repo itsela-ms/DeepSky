@@ -26,6 +26,7 @@ Copilot CLI is powerful, but managing sessions is painful. You're copying UUIDs,
 - Full-featured terminal with 10,000-line scrollback, link detection, and clipboard support
 - Multi-tab interface — switch between sessions like browser tabs
 - Seamless session switching without losing state
+- Optional Agency launcher mode plus shared extra Copilot args for new sessions, such as `agency copilot --agent squad`
 
 ### Smart Search & Resources
 - Find sessions by title, tags, PR numbers, work item IDs, or repo names
@@ -91,7 +92,7 @@ npm start
 
 ## Updates
 
-DeepSky checks for updates automatically every 15 minutes. When a new version is found, it downloads silently and installs on your next quit — no restarts, no interruptions. A green badge on the settings gear lets you know an update is pending.
+DeepSky checks for updates automatically every 15 minutes. When a new version is found, it downloads silently and applies before DeepSky opens on the next launch. A green badge on the settings gear lets you know an update is pending.
 
 ---
 

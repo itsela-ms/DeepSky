@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -139,6 +139,48 @@ describe('SessionService', () => {
 
       const cwd = await svc.getCwd('sess-cwd-fresh-workspace');
       expect(cwd).toBe('/workspace-new');
+    });
+  });
+
+  describe('launcher metadata', () => {
+    it('persists launcher args independently of launcher choice', async () => {
+      await svc.saveLauncher('launcher-args', 'agency');
+      await svc.saveLauncherArgs('launcher-args', '--agent squad');
+
+      await expect(svc.getLauncher('launcher-args')).resolves.toBe('agency');
+      await expect(svc.getLauncherArgs('launcher-args')).resolves.toBe('--agent squad');
+    });
+
+    it('returns empty launcher args for older sessions', async () => {
+      await createSession('old-launcher-session', 'summary: old');
+      await expect(svc.getLauncherArgs('old-launcher-session')).resolves.toBe('');
+    });
+
+    it('drops malformed persisted launcher args so old sessions can reopen', async () => {
+      await createSession('bad-launcher-args', 'summary: old');
+      await fs.promises.writeFile(path.join(tmpDir, 'bad-launcher-args', '.deepsky-launcher-args'), '--agent "squad', 'utf8');
+
+      await expect(svc.getLauncherArgs('bad-launcher-args')).resolves.toBe('');
+      await expect(fs.promises.access(path.join(tmpDir, 'bad-launcher-args', '.deepsky-launcher-args'))).rejects.toThrow();
+    });
+
+    it('does not delete launcher args when reading metadata fails', async () => {
+      await createSession('locked-launcher-args', 'summary: old');
+      const argsPath = path.join(tmpDir, 'locked-launcher-args', '.deepsky-launcher-args');
+      await fs.promises.writeFile(argsPath, '--agent squad', 'utf8');
+      const readError = new Error('locked');
+      readError.code = 'EACCES';
+      const readFile = vi.spyOn(fs.promises, 'readFile').mockImplementation(async (file, ...args) => {
+        if (file === argsPath) throw readError;
+        return fs.readFileSync(file, ...args);
+      });
+
+      try {
+        await expect(svc.getLauncherArgs('locked-launcher-args')).resolves.toBe('');
+      } finally {
+        readFile.mockRestore();
+      }
+      await expect(fs.promises.readFile(argsPath, 'utf8')).resolves.toBe('--agent squad');
     });
   });
 

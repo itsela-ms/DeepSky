@@ -30,6 +30,10 @@
       <div class="startup-loading-spinner" aria-hidden="true"></div>
       <div id="startup-loading-title" class="startup-loading-title">Starting DeepSky...</div>
       <div id="startup-loading-message" class="startup-loading-message">Loading your sessions and workspace...</div>
+      <div id="startup-loading-progress" class="startup-loading-progress hidden" role="progressbar" aria-label="Startup progress" aria-valuemin="0" aria-valuemax="100">
+        <div id="startup-loading-progress-bar" class="startup-loading-progress-bar"></div>
+      </div>
+      <div id="startup-loading-progress-label" class="startup-loading-progress-label"></div>
     </div>
   </div>
 
@@ -185,13 +189,22 @@
             </div>
             <div class="settings-row" id="agency-launcher-row">
               <div class="settings-row-text">
-                <span class="settings-row-title">Use agency copilot for new sessions</span>
+                <span class="settings-row-title" id="agency-launcher-title">Use agency copilot for new sessions</span>
                 <span class="settings-row-desc" id="agency-launcher-desc">Launch new sessions with <code>agency copilot</code> instead of the default Copilot CLI command</span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" id="use-agency-copilot" aria-describedby="agency-launcher-desc">
+                <input type="checkbox" id="use-agency-copilot" aria-labelledby="agency-launcher-title" aria-describedby="agency-launcher-desc">
                 <span class="toggle-slider"></span>
               </label>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <span class="settings-row-title" id="copilot-args-title">Extra Copilot args</span>
+                <span class="settings-row-desc" id="copilot-args-desc">Extra arguments for new sessions. DeepSky passes them to <code>copilot</code>, or after <code>agency copilot</code> when Agency is enabled.</span>
+              </div>
+            </div>
+            <div class="settings-input-row settings-args-row">
+              <input type="text" id="copilot-args" placeholder="Example: --agent squad" aria-labelledby="copilot-args-title" aria-describedby="copilot-args-desc">
             </div>
           </div>
 
@@ -231,6 +244,19 @@
                 <div class="theme-preview light"></div>
                 Latte
               </button>
+            </div>
+          </div>
+          <div class="settings-group">
+            <label class="settings-label">Terminal</label>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <span class="settings-row-title" id="copy-on-select-title">Copy on select</span>
+                <span class="settings-row-desc" id="copy-on-select-desc">Automatically copy selected terminal text to the clipboard</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="copy-on-select" aria-labelledby="copy-on-select-title" aria-describedby="copy-on-select-desc">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
           </div>
         </div>

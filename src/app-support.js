@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const SAFE_COMMAND_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+const UNSAFE_ARG_CHARS_RE = /[\0\r\n&|<>^]/;
 
 // Module-level cache for CLI path probes. resolveAgency/Copilot are called
 // on every settings:get, every session creation, and every warm-up — which
@@ -147,7 +148,7 @@ function resolveAgencyInfo(deps = {}) {
   let names;
   let candidates;
   if (platform === 'win32') {
-    names = ['agency.exe', 'agency.cmd'];
+    names = [];
     candidates = [
       path.join(env.APPDATA || '', 'agency', 'CurrentVersion', 'agency.exe'),
       path.join(env.LOCALAPPDATA || '', 'agency', 'CurrentVersion', 'agency.exe'),
@@ -167,6 +168,60 @@ function resolveAgencyInfo(deps = {}) {
   });
   if (cacheable) _commandPathCache.set('agency', result);
   return result;
+}
+
+function parseLauncherArgs(value = '') {
+  if (typeof value !== 'string') {
+    throw new Error('Custom launcher arguments must be a string.');
+  }
+
+  const args = [];
+  let current = '';
+  let quote = null;
+  let tokenStarted = false;
+
+  for (const ch of value.trim()) {
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      tokenStarted = true;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      if (tokenStarted) {
+        args.push(current);
+        current = '';
+        tokenStarted = false;
+      }
+      continue;
+    }
+
+    current += ch;
+    tokenStarted = true;
+  }
+
+  if (quote) {
+    throw new Error('Custom launcher arguments contain an unclosed quote.');
+  }
+  if (tokenStarted) args.push(current);
+
+  for (const arg of args) {
+    if (UNSAFE_ARG_CHARS_RE.test(arg)) {
+      throw new Error('Custom launcher arguments cannot contain shell control characters.');
+    }
+  }
+
+  return args;
 }
 
 // Probe the user's login shell PATH on macOS. Cached for process lifetime.
@@ -348,6 +403,7 @@ module.exports = {
   getLoginShellPath,
   isValidSessionId,
   pickNotificationDisplay,
+  parseLauncherArgs,
   resolveCommandPath,
   resolveAgencyInfo,
   resolveBrochureInfo,

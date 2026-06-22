@@ -27,6 +27,7 @@ function createManager(settings = {}, overrides = {}) {
   return new PtyManager('/fake/copilot', settingsService, mockPtyModule, {
     sessionStateDir: '/fake/session-state',
     sessionIdDiscoverer: mockSessionIdDiscoverer,
+    agencyPath: process.platform === 'win32' ? 'C:\\Tools\\agency.exe' : '/opt/agency/bin/agency',
     ...overrides,
   });
 }
@@ -355,14 +356,87 @@ describe('PtyManager', () => {
       const [file, args, options] = mockPtyModule.spawn.mock.calls[0];
 
       if (process.platform === 'win32') {
-        expect(file).toBe('cmd.exe');
-        expect(args).toEqual(['/c', 'agency', 'copilot', '--yolo']);
+        expect(file).toBe('C:\\Tools\\agency.exe');
+        expect(args).toEqual(['copilot', '--yolo']);
       } else {
-        expect(file).toBe('agency');
+        expect(file).toBe('/opt/agency/bin/agency');
         expect(args).toEqual(['copilot', '--yolo']);
       }
       expect(options.cwd).toBe('/agency/project');
       expect(manager.sessions.get(id).launcher).toBe('agency');
+    });
+
+    it('passes custom copilot args before DeepSky default args', async () => {
+      manager = createManager({ copilotArgs: '--model gpt-5.5 --profile "fast lane"' });
+      await manager.newSession('/copilot/project');
+      const [, args] = mockPtyModule.spawn.mock.calls[0];
+
+      expect(args).toEqual(['--model', 'gpt-5.5', '--profile', 'fast lane', '--yolo']);
+    });
+
+    it('uses captured launcher args for queued cold-start sessions', async () => {
+      manager = createManager({ copilotArgs: '--model current' });
+      await manager.newSession('/copilot/project', 'copilot', [], '--model captured');
+      const [, args] = mockPtyModule.spawn.mock.calls[0];
+
+      expect(args).toEqual(['--model', 'captured', '--yolo']);
+    });
+
+    it('passes the shared custom args after agency copilot when Agency is enabled', async () => {
+      manager = createManager({ useAgencyCopilot: true, copilotArgs: '--agent squad' });
+      await manager.newSession('/agency/project');
+      const [file, args] = mockPtyModule.spawn.mock.calls[0];
+
+      if (process.platform === 'win32') {
+        expect(file).toBe('C:\\Tools\\agency.exe');
+        expect(args).toEqual(['copilot', '--agent', 'squad', '--yolo']);
+      } else {
+        expect(file).toBe('/opt/agency/bin/agency');
+        expect(args).toEqual(['copilot', '--agent', 'squad', '--yolo']);
+      }
+    });
+
+    it('uses saved launcher args when reopening existing sessions', () => {
+      manager = createManager({ copilotArgs: '--model current' });
+      manager.openSession('restore-args', '/cwd', 'copilot', '--model saved');
+      const [, args] = mockPtyModule.spawn.mock.calls[0];
+
+      expect(args).toEqual(['--model', 'saved', '--session-id', 'restore-args', '--yolo']);
+    });
+
+    it('does not apply current custom args when reopening older sessions without saved args', () => {
+      manager = createManager({ copilotArgs: '--model current' });
+      manager.openSession('restore-no-args', '/cwd', 'copilot');
+      const [, args] = mockPtyModule.spawn.mock.calls[0];
+
+      expect(args).toEqual(['--session-id', 'restore-no-args', '--yolo']);
+    });
+
+    it('uses cmd.exe only with an absolute agency .cmd path on Windows', async () => {
+      if (process.platform !== 'win32') return;
+      manager = createManager({ useAgencyCopilot: true, copilotArgs: '--agent squad' }, { agencyPath: 'C:\\Tools\\agency.cmd' });
+      await manager.newSession('/agency/project');
+      const [file, args] = mockPtyModule.spawn.mock.calls[0];
+
+      expect(file.toLowerCase()).toMatch(/\\system32\\cmd\.exe$/);
+      expect(args).toEqual(['/d', '/s', '/c', '"C:\\Tools\\agency.cmd"', 'copilot', '--agent', 'squad', '--yolo']);
+    });
+
+    it('rejects environment-expansion characters for Windows .cmd launcher args', async () => {
+      if (process.platform !== 'win32') return;
+      manager = createManager(
+        { useAgencyCopilot: true, copilotArgs: '--agent %DEEPSKY_INJECT%' },
+        { agencyPath: 'C:\\Tools\\agency.cmd' }
+      );
+
+      await expect(manager.newSession('/agency/project')).rejects.toThrow(/cannot contain % or !/);
+      expect(mockPtyModule.spawn).not.toHaveBeenCalled();
+    });
+
+    it('rejects unsafe custom launcher args before spawning', async () => {
+      manager = createManager({ copilotArgs: '--model gpt & whoami' });
+      await expect(manager.newSession('/copilot/project')).rejects.toThrow(/shell control/);
+      expect(mockPtyModule.spawn).not.toHaveBeenCalled();
     });
 
     it('rejects standby sessions when launcher does not match', async () => {
@@ -467,12 +541,39 @@ describe('PtyManager', () => {
       expect(manager._standby).toBeNull();
     });
 
+    it('updateSettings clears stale standby when launcher args change', async () => {
+      let settings = { maxConcurrent: 5, useAgencyCopilot: false, copilotArgs: '' };
+      manager = new PtyManager('/fake/copilot', { get: () => settings }, mockPtyModule, {
+        sessionStateDir: '/fake/session-state',
+        sessionIdDiscoverer: mockSessionIdDiscoverer,
+        agencyPath: process.platform === 'win32' ? 'C:\\Tools\\agency.exe' : '/opt/agency/bin/agency',
+      });
+      await manager.warmUp('/cwd', 'copilot');
+      const standbyPty = manager._standby.pty;
+      settings = { ...settings, copilotArgs: '--model gpt-5.5' };
+      manager.updateSettings({ useAgencyCopilot: false, promptForWorkdir: false, defaultWorkdir: '/cwd', copilotArgs: '--model gpt-5.5' });
+      expect(standbyPty.kill).toHaveBeenCalled();
+      expect(manager._standby).toBeNull();
+    });
+
     it('updateSettings clears standby when prompt-for-workdir is enabled', async () => {
       await manager.warmUp('/cwd', 'copilot');
       const standbyPty = manager._standby.pty;
       manager.updateSettings({ useAgencyCopilot: false, promptForWorkdir: true, defaultWorkdir: '/cwd' });
       expect(standbyPty.kill).toHaveBeenCalled();
       expect(manager._standby).toBeNull();
+    });
+
+    it('updateSettings keeps standby and generation for unrelated settings changes', async () => {
+      await manager.warmUp('/cwd', 'copilot');
+      const standby = manager._standby;
+      const generation = manager._warmUpGeneration;
+
+      manager.updateSettings({ theme: 'latte', activeTab: 'abc' }, false);
+
+      expect(manager._standby).toBe(standby);
+      expect(manager._warmUpGeneration).toBe(generation);
+      expect(standby.pty.kill).not.toHaveBeenCalled();
     });
 
     it('claimStandby returns null when no standby exists', () => {

@@ -29,6 +29,8 @@ const RENDERER_SRC = readFileSync(join(ROOT, 'src', 'renderer.js'), 'utf8');
 const SHORTCUTS_SRC = readFileSync(join(ROOT, 'src', 'keyboard-shortcuts.js'), 'utf8');
 const MAIN_SRC = readFileSync(join(ROOT, 'src', 'main.js'), 'utf8');
 const PRELOAD_SRC = readFileSync(join(ROOT, 'src', 'preload.js'), 'utf8');
+const PTY_MANAGER_SRC = readFileSync(join(ROOT, 'src', 'pty-manager.js'), 'utf8');
+const STYLES_SRC = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8');
 
 // ───────────────────────────────────────────────────────────────────────────
 // Terminal link handling — double-open + hover-cursor regression guard
@@ -97,6 +99,30 @@ describe('main process session creation — regression guardrails', () => {
       `PtyManager.newSession returns a Promise; un-awaited callers persist invalid session IDs:\n${offenders.join('\n')}`
     ).toEqual([]);
   });
+
+  it('persists launcher args per session and restores with saved args, not current settings', () => {
+    expect(MAIN_SRC).toMatch(/saveLauncherArgs\(claimed\.id,\s*launcherArgs\)/);
+    expect(MAIN_SRC).toMatch(/saveLauncherArgs\(sessionId,\s*launcherArgs\)/);
+    expect(MAIN_SRC).toMatch(/getLauncherArgs\(sessionId\)/);
+    expect(PTY_MANAGER_SRC).toMatch(/openSession\(sessionId, cwd, launcher, launcherArgsText = ''\)/);
+  });
+
+  it('invalidates in-flight warm-ups when launcher settings change', () => {
+    expect(PTY_MANAGER_SRC).toMatch(/_warmUpGeneration/);
+    expect(PTY_MANAGER_SRC).toMatch(/generation !== this\._warmUpGeneration/);
+    expect(PTY_MANAGER_SRC).toMatch(/expectedKey !== this\._standbyKey/);
+  });
+
+  it('passes captured launcher args into cold new-session spawns', () => {
+    expect(MAIN_SRC).toMatch(/ptyManager\.newSession\(cwd \|\| undefined,\s*launcher,\s*\[\],\s*launcherArgs\)/);
+    expect(MAIN_SRC).toMatch(/ptyManager\.newSession\(undefined,\s*launcher,\s*\['-i', oneLineCommand\],\s*launcherArgs\)/);
+  });
+
+  it('uses an absolute Windows command processor path for .cmd launchers', () => {
+    expect(PTY_MANAGER_SRC).toMatch(/this\._cmdPath\s*=\s*options\.cmdPath/);
+    expect(PTY_MANAGER_SRC).toMatch(/file:\s*this\._cmdPath/);
+    expect(PTY_MANAGER_SRC).not.toMatch(/file:\s*['"]cmd\.exe['"]/);
+  });
 });
 
 describe('sidebar history search — regression guardrails', () => {
@@ -122,6 +148,54 @@ describe('closed tab restore — regression guardrails', () => {
 
   it('keeps Active-list session closes restorable through Ctrl+Shift+T', () => {
     expect(RENDERER_SRC).toMatch(/terminateSession\(item\.dataset\.sessionId,\s*\{\s*rememberClosedTab:\s*true\s*\}\)/);
+  });
+});
+
+describe('startup update install — regression guardrails', () => {
+  it('keeps the update status listener alive across the startup install gate', () => {
+    const initStart = RENDERER_SRC.indexOf('async function init()');
+    expect(initStart).toBeGreaterThanOrEqual(0);
+
+    const cleanupIdx = RENDERER_SRC.indexOf('while (ipcCleanups.length) ipcCleanups.pop()();', initStart);
+    const updateListenerIdx = RENDERER_SRC.indexOf('window.api.onUpdateStatus(handleUpdateStatus)', initStart);
+    const installGateIdx = RENDERER_SRC.indexOf('installPendingUpdateOnStartup()', initStart);
+
+    expect(cleanupIdx, 'existing IPC listeners must be cleared before registering update status').toBeGreaterThan(initStart);
+    expect(updateListenerIdx, 'update status listener must be registered during startup').toBeGreaterThan(cleanupIdx);
+    expect(installGateIdx, 'startup install gate must run after update status listener registration').toBeGreaterThan(updateListenerIdx);
+  });
+
+  it('marks the decorative update badge as hidden from assistive technology', () => {
+    expect(RENDERER_SRC).toMatch(/badge\.setAttribute\(\s*['"]aria-hidden['"],\s*['"]true['"]\s*\)/);
+  });
+
+  it('clears the startup install flag when install status reports an error', () => {
+    const recoveryIdx = RENDERER_SRC.indexOf('function recoverFromStartupInstallError');
+    expect(recoveryIdx).toBeGreaterThanOrEqual(0);
+
+    const block = RENDERER_SRC.slice(recoveryIdx, RENDERER_SRC.indexOf('async function init()', recoveryIdx));
+    expect(block).toMatch(/startupInstallInProgress\s*=\s*false/);
+  });
+
+  it('recovers startup install errors by opening the current version instead of failing startup', () => {
+    const errorCaseIdx = RENDERER_SRC.indexOf("case 'error':");
+    expect(errorCaseIdx).toBeGreaterThanOrEqual(0);
+
+    const block = RENDERER_SRC.slice(errorCaseIdx, RENDERER_SRC.indexOf("case 'idle':", errorCaseIdx));
+    expect(block).toMatch(/recoverFromStartupInstallError\(data\.error\)/);
+    expect(block).not.toMatch(/startupLoading\.fail/);
+  });
+
+  it('describes downloaded updates as next-launch installs, not quit-time installs', () => {
+    expect(RENDERER_SRC).toMatch(/before DeepSky opens on next launch/);
+    expect(RENDERER_SRC).not.toMatch(/next quit|next time you close DeepSky/i);
+  });
+
+  it('keeps startup progress usable with reduced motion and forced-colors modes', () => {
+    expect(STYLES_SRC).toMatch(/@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)/);
+    expect(STYLES_SRC).toMatch(/@media\s*\(\s*forced-colors:\s*active\s*\)/);
+    expect(STYLES_SRC).toMatch(/startup-loading-progress\.indeterminate\s+\.startup-loading-progress-bar[\s\S]*animation:\s*none/);
+    expect(STYLES_SRC).toMatch(/startup-loading-progress-bar[\s\S]*background:\s*Highlight/);
   });
 });
 
