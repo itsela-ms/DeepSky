@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey } = require('../src/keyboard-shortcuts');
+const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey, sanitizePasteText } = require('../src/keyboard-shortcuts');
 
 /** Build a minimal synthetic keydown event. */
 function key(overrides = {}) {
@@ -240,6 +240,31 @@ describe('createTerminalKeyHandler', () => {
     });
   });
 
+  it('Ctrl+V: uses xterm paste transformations when available', async () => {
+    terminal.paste = vi.fn();
+    api.pasteText.mockResolvedValue('clipboard content');
+    handler = createTerminalKeyHandler(SESSION_ID, terminal, api);
+
+    handler(key({ ctrlKey: true, key: 'v' }));
+
+    await vi.waitFor(() => {
+      expect(terminal.paste).toHaveBeenCalledWith('clipboard content');
+    });
+    expect(api.writePty).not.toHaveBeenCalled();
+  });
+
+  it('Ctrl+V: strips embedded bracketed-paste markers before xterm paste', async () => {
+    terminal.paste = vi.fn();
+    api.pasteText.mockResolvedValue('safe\x1b[201~\nunsafe');
+    handler = createTerminalKeyHandler(SESSION_ID, terminal, api);
+
+    handler(key({ ctrlKey: true, key: 'v' }));
+
+    await vi.waitFor(() => {
+      expect(terminal.paste).toHaveBeenCalledWith('safe\nunsafe');
+    });
+  });
+
   it('Ctrl+V: does not write to PTY when clipboard is empty', async () => {
     api.pasteText.mockResolvedValue('');
     handler(key({ ctrlKey: true, key: 'v' }));
@@ -255,6 +280,12 @@ describe('createTerminalKeyHandler', () => {
 
     expect(result).toBe(false);
     expect(api.pasteText).toHaveBeenCalled();
+  });
+
+  describe('sanitizePasteText', () => {
+    it('removes bracketed-paste delimiters from clipboard text', () => {
+      expect(sanitizePasteText('\x1b[200~hello\x1b[201~')).toBe('hello');
+    });
   });
 
   // ── Meta (macOS Cmd) equivalents ──────────────────────────────────────────

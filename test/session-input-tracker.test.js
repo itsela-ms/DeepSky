@@ -52,6 +52,13 @@ describe('session-input-tracker', () => {
     ]);
   });
 
+  it('ignores bracketed-paste delimiters around pasted commands', () => {
+    const onCommand = vi.fn();
+    processSessionInput({}, '\x1b[200~/cwd C:\\src\\DeepSky\x1b[201~\r', onCommand);
+
+    expect(onCommand).toHaveBeenCalledWith('/cwd C:\\src\\DeepSky');
+  });
+
   it('extracts metadata command details for cwd', () => {
     expect(extractMetadataCommand('/cwd "C:\\src\\DeepSky"')).toEqual({
       type: 'cwd',

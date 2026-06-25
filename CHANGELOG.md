@@ -4,6 +4,22 @@ All notable changes to DeepSky are documented here.
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-06-25
+
+### Added
+- **macOS installers** — CI now builds macOS `.dmg` / `.zip` artifacts alongside the Windows installer, with packaging support for bundled native modules.
+- **Custom launcher arguments** — Settings now has one shared **Extra Copilot args** field for new sessions. The value is passed to `copilot`, or after `agency copilot` when the Agency launcher toggle is enabled, and each session keeps the args it was created with.
+
+### Changed
+- **Downloaded updates install on next launch** — auto-downloaded updates are persisted as pending installs, revalidated through the updater cache, and applied before DeepSky opens instead of waiting for a quit-time install path that can be missed.
+- **Startup loading now shows update progress** — the loading screen includes progress state for pending update installation and recovers by opening the current version if the installer reports an error.
+- **Active-list groups are easier to organize** — group headers can be dragged to reorder entire groups, and the top tab strip stays in the same order.
+
+### Fixed
+- **Ctrl+V paste works reliably** — terminal paste now handles both keyboard and browser paste paths, strips unsafe bracketed-paste markers, and preserves local command tracking for pasted `/cwd` and `/rename` commands.
+- **Closed tabs reopen again** — `Ctrl+Shift+T` keeps the restore stack intact until the tab actually reopens and recovers cleanly from transient restore failures.
+- **Launcher args are guarded** — malformed saved args no longer break session reopen, shell-control characters are rejected, and Windows `.cmd` launches use a hardened absolute command processor path.
+
 ## [1.2.4-beta.1] - 2026-06-22
 
 ### Added

@@ -21,4 +21,23 @@ function popRestorableClosedSession(stack, validIds) {
   return null;
 }
 
-module.exports = { rememberRestorableClosedSession, popRestorableClosedSession };
+function peekRestorableClosedSession(stack, validIds) {
+  for (let i = stack.length - 1; i >= 0; i -= 1) {
+    const sessionId = stack[i];
+    if (validIds.has(sessionId)) return sessionId;
+    stack.splice(i, 1);
+  }
+  return null;
+}
+
+function forgetRestorableClosedSession(stack, sessionId) {
+  const index = stack.lastIndexOf(sessionId);
+  if (index !== -1) stack.splice(index, 1);
+}
+
+module.exports = {
+  rememberRestorableClosedSession,
+  popRestorableClosedSession,
+  peekRestorableClosedSession,
+  forgetRestorableClosedSession,
+};

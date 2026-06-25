@@ -72,18 +72,50 @@ describe('top tab strip mirrors sidebar sessionOrder', () => {
     expect(syncIdx).toBeGreaterThan(lastMutationIdx);
   });
 
+  it('normalizes grouped sessions before ungrouped sessions before syncing the strip', () => {
+    const normalizeStart = src.indexOf('function normalizeSessionOrderToActiveList()');
+    expect(normalizeStart).toBeGreaterThan(-1);
+    const normalizeSlice = src.slice(normalizeStart, normalizeStart + 1000);
+    expect(normalizeSlice).toContain('groupedOrder');
+    expect(normalizeSlice).toContain('ungroupedOrder');
+    expect(normalizeSlice).toMatch(/sessionOrder = \[\.\.\.groupedOrder,\s*\.\.\.ungroupedOrder\]/);
+
+    const groupReorderStart = src.indexOf('function handleGroupReorder');
+    expect(groupReorderStart).toBeGreaterThan(-1);
+    const groupReorderSlice = src.slice(groupReorderStart, groupReorderStart + 900);
+    const normalizeIdx = groupReorderSlice.indexOf('normalizeSessionOrderToActiveList()');
+    const syncIdx = groupReorderSlice.indexOf('syncTabStripOrder()');
+    expect(normalizeIdx).toBeGreaterThan(-1);
+    expect(syncIdx).toBeGreaterThan(normalizeIdx);
+  });
+
+  it('normalizes grouped ordering when group membership changes', () => {
+    for (const functionName of ['createGroup', 'removeGroup', 'addTabToGroup', 'removeTabFromGroup']) {
+      const start = src.indexOf(`function ${functionName}`);
+      expect(start, `${functionName} must exist`).toBeGreaterThan(-1);
+      const slice = src.slice(start, start + 900);
+      const normalizeIdx = slice.indexOf('normalizeSessionOrderToActiveList()');
+      const syncIdx = slice.indexOf('syncTabStripOrder()');
+      expect(normalizeIdx, `${functionName} should normalize sessionOrder`).toBeGreaterThan(-1);
+      expect(syncIdx, `${functionName} should sync the tab strip`).toBeGreaterThan(normalizeIdx);
+    }
+  });
+
   it('init realigns the strip after restoring saved sessionOrder', () => {
     // Find the restore-from-settings line and ensure syncTabStripOrder is
     // called nearby (within the same block, before renderSessionList).
     const restoreIdx = src.indexOf('sessionOrder = settings.sessionOrder.filter');
     expect(restoreIdx).toBeGreaterThan(-1);
     const after = src.slice(restoreIdx, restoreIdx + 600);
+    const normalizeIdx = after.indexOf('normalizeSessionOrderToActiveList()');
     const syncIdx = after.indexOf('syncTabStripOrder()');
     const renderIdx = after.indexOf('renderSessionList()');
+    expect(normalizeIdx).toBeGreaterThan(-1);
     expect(syncIdx).toBeGreaterThan(-1);
     expect(renderIdx).toBeGreaterThan(-1);
     // Sync must run before renderSessionList so the strip is consistent
     // with what the sidebar paints in the same frame.
+    expect(normalizeIdx).toBeLessThan(syncIdx);
     expect(syncIdx).toBeLessThan(renderIdx);
   });
 });

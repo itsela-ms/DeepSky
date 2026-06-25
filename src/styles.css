@@ -2553,9 +2553,23 @@ body {
   background: var(--bg-hover);
 }
 
+.session-group-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  background: var(--bg-hover);
+}
+
 .session-group-header.drag-over {
   background: rgba(137, 180, 250, 0.15);
   outline: 1px dashed var(--accent);
+}
+
+.session-group-header.drop-above {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.session-group-header.drop-below {
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .session-group-chevron {

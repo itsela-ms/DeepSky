@@ -1,7 +1,8 @@
 function processSessionInput(state = {}, data, onCommand) {
   let line = state.line || '';
+  const input = String(data || '').replace(/\x1b\[(?:200|201)~/g, '');
 
-  for (const ch of data || '') {
+  for (const ch of input) {
     if (ch === '\r' || ch === '\n') {
       const command = line.trim();
       if (command) onCommand?.(command);

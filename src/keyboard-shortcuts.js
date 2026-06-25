@@ -56,6 +56,10 @@ function getGlobalShortcutAction(e, context = {}) {
   return null;
 }
 
+function sanitizePasteText(text) {
+  return String(text || '').replace(/\x1b\[(?:200|201)~/g, '');
+}
+
 /**
  * Creates the xterm custom key event handler for a terminal session.
  *
@@ -126,8 +130,14 @@ function createTerminalKeyHandler(sessionId, terminal, api, hooks = {}) {
       e.preventDefault();
       api.pasteText().then(text => {
         if (text) {
-          hooks.onInput?.(text);
-          api.writePty(sessionId, text);
+          const sanitizedText = sanitizePasteText(text);
+          if (!sanitizedText) return;
+          if (typeof terminal.paste === 'function') {
+            terminal.paste(sanitizedText);
+          } else {
+            hooks.onInput?.(sanitizedText);
+            api.writePty(sessionId, sanitizedText);
+          }
         }
       });
       return false;
@@ -137,4 +147,4 @@ function createTerminalKeyHandler(sessionId, terminal, api, hooks = {}) {
   };
 }
 
-module.exports = { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey };
+module.exports = { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey, sanitizePasteText };

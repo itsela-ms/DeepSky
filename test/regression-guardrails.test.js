@@ -138,6 +138,14 @@ describe('closed tab restore — regression guardrails', () => {
     expect(RENDERER_SRC).toMatch(/allSessions\.map\(session => session\.id\)/);
   });
 
+  it('does not pop a closed tab until reopening succeeds', () => {
+    expect(RENDERER_SRC).toMatch(/let restoringClosedTab = false/);
+    const body = RENDERER_SRC.match(/async function restoreMostRecentClosedTab\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+    expect(body.indexOf('try {')).toBeLessThan(body.indexOf('await getAllValidSessionIds()'));
+    expect(body).toMatch(/peekRestorableClosedSession\(recentlyClosedSessions,\s*validIds\)/);
+    expect(RENDERER_SRC).toMatch(/await openSession\(sessionId\)[\s\S]*if \(openTabIds\.has\(sessionId\)\) \{[\s\S]*forgetRestorableClosedSession\(recentlyClosedSessions,\s*sessionId\)/);
+  });
+
   it('handles Ctrl+Shift+T from the Electron input path, not only the renderer keydown path', () => {
     expect(MAIN_SRC).toMatch(/before-input-event/);
     expect(MAIN_SRC).toMatch(/shortcut:restore-tab/);
@@ -148,6 +156,47 @@ describe('closed tab restore — regression guardrails', () => {
 
   it('keeps Active-list session closes restorable through Ctrl+Shift+T', () => {
     expect(RENDERER_SRC).toMatch(/terminateSession\(item\.dataset\.sessionId,\s*\{\s*rememberClosedTab:\s*true\s*\}\)/);
+  });
+});
+
+describe('active-list group reorder — regression guardrails', () => {
+  it('only shows session row drop indicators for session drags', () => {
+    expect(RENDERER_SRC).toMatch(/const isSessionDrag = \[\.\.\.e\.dataTransfer\.types\]\.includes\(['"]application\/x-session-id['"]\)/);
+    expect(RENDERER_SRC).toMatch(/if \(!isSessionDrag\) \{[\s\S]*?el\.classList\.remove\(['"]drop-above['"],\s*['"]drop-below['"]\)/);
+  });
+
+  it('makes group headers draggable and reorders groups on group-header drop', () => {
+    expect(RENDERER_SRC).toMatch(/headerEl\.setAttribute\(['"]draggable['"],\s*['"]true['"]\)/);
+    expect(RENDERER_SRC).toMatch(/setData\(['"]application\/x-group-id['"],\s*group\.id\)/);
+    expect(RENDERER_SRC).toMatch(/getData\(['"]application\/x-group-id['"]\)/);
+    expect(RENDERER_SRC).toMatch(/const isGroupDrag = \[\.\.\.e\.dataTransfer\.types\]\.includes\(['"]application\/x-group-id['"]\)/);
+    expect(RENDERER_SRC).toMatch(/if \(!isGroupDrag && !isSessionDrag\) \{[\s\S]*?headerEl\.classList\.remove\(['"]drag-over['"],\s*['"]drop-above['"],\s*['"]drop-below['"]\)/);
+    expect(RENDERER_SRC).toMatch(/function handleGroupReorder\(draggedGroupId,\s*targetGroupId,\s*insertAbove\)/);
+    expect(RENDERER_SRC).toMatch(/handleGroupReorder\(draggedGroupId,\s*group\.id,\s*above\)/);
+    expect(RENDERER_SRC).toMatch(/tabGroups\.splice\(insertAbove \? targetIndex : targetIndex \+ 1,\s*0,\s*draggedGroup\)/);
+    expect(RENDERER_SRC).toMatch(/function normalizeSessionOrderToActiveList\(\)/);
+    expect(RENDERER_SRC).toMatch(/sessionOrder = \[\.\.\.groupedOrder,\s*\.\.\.ungroupedOrder\]/);
+    expect(RENDERER_SRC).toMatch(/function handleGroupReorder[\s\S]*normalizeSessionOrderToActiveList\(\)/);
+    expect(RENDERER_SRC).toMatch(/function handleGroupReorder[\s\S]*syncTabStripOrder\(\)/);
+    expect(STYLES_SRC).toMatch(/\.session-group-header\.drop-above/);
+    expect(STYLES_SRC).toMatch(/\.session-group-header\.drop-below/);
+  });
+
+  it('keeps group reorder keyboard accessible', () => {
+    expect(RENDERER_SRC).toMatch(/headerEl\.setAttribute\(['"]tabindex['"],\s*['"]0['"]\)/);
+    expect(RENDERER_SRC).toMatch(/headerEl\.setAttribute\(['"]role['"],\s*['"]button['"]\)/);
+    expect(RENDERER_SRC).toMatch(/headerEl\.setAttribute\(['"]aria-expanded['"]/);
+    expect(RENDERER_SRC).toMatch(/e\.altKey && e\.key === ['"]ArrowUp['"][\s\S]*moveGroupByOffset\(group\.id,\s*-1\)/);
+    expect(RENDERER_SRC).toMatch(/e\.altKey && e\.key === ['"]ArrowDown['"][\s\S]*moveGroupByOffset\(group\.id,\s*1\)/);
+    expect(RENDERER_SRC).toMatch(/function moveGroupByOffset\(groupId,\s*offset\)[\s\S]*handleGroupReorder\(groupId,\s*target\.id,\s*offset < 0\)/);
+    expect(RENDERER_SRC).toMatch(/function moveGroupByOffset\(groupId,\s*offset\)[\s\S]*\.session-group-header\[data-group-id="\$\{groupId\}"\][\s\S]*\.focus\(\)/);
+    expect(RENDERER_SRC).toMatch(/label:\s*['"]Move group up['"][\s\S]*moveGroupByOffset\(groupId,\s*-1\)/);
+    expect(RENDERER_SRC).toMatch(/label:\s*['"]Move group down['"][\s\S]*moveGroupByOffset\(groupId,\s*1\)/);
+    expect(RENDERER_SRC).toMatch(/menu\.setAttribute\(['"]role['"],\s*['"]menu['"]\)/);
+    expect(RENDERER_SRC).toMatch(/wireMenuItem[\s\S]*el\.setAttribute\(['"]role['"],\s*['"]menuitem['"]\)/);
+    expect(RENDERER_SRC).toMatch(/function showGroupContextMenu\(e,\s*groupId\)[\s\S]*return showContextMenu\(e\.clientX,\s*e\.clientY,\s*items\)/);
+    expect(RENDERER_SRC).toMatch(/menu\?\.querySelector\('\[role="menuitem"\], \[role="menuitemradio"\]'\)\?\.focus\(\)/);
+    expect(STYLES_SRC).toMatch(/\.session-group-header:focus-visible/);
   });
 });
 
@@ -234,6 +283,13 @@ describe('keyboard shortcuts — non-Latin layout regression guardrails', () => 
       offenders,
       `Found layout-dependent letter comparisons in keyboard-shortcuts.js: ${offenders?.join(', ')}`
     ).toBeNull();
+  });
+
+  it('terminal paste events write clipboard text instead of only suppressing native paste', () => {
+    expect(RENDERER_SRC).toMatch(/addEventListener\(['"]paste['"][\s\S]*?e\.preventDefault\(\)/);
+    expect(RENDERER_SRC).toMatch(/sanitizePasteText\(e\.clipboardData\?\.getData\(['"]text\/plain['"]\)\)/);
+    expect(RENDERER_SRC).toMatch(/terminal\.paste\(pasted\)/);
+    expect(RENDERER_SRC).toMatch(/window\.api\.pasteText\(\)\.then\(text =>[\s\S]*?sanitizePasteText\(text\)[\s\S]*?terminal\.paste\(sanitizedText\)/);
   });
 
   it('getShortcutKey is exported from keyboard-shortcuts.js', () => {

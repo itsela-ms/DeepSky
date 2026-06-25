@@ -2,10 +2,10 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { deriveSessionState, getNewSessionAvailability, filterSessionsForSidebar } = require('./session-state');
-const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey } = require('./keyboard-shortcuts');
+const { createTerminalKeyHandler, getGlobalShortcutAction, getShortcutKey, sanitizePasteText } = require('./keyboard-shortcuts');
 const { collectTerminalSearchMatches } = require('./terminal-search');
 const { resolveSidebarDragWidth } = require('./sidebar-resize');
-const { rememberRestorableClosedSession, popRestorableClosedSession } = require('./recently-closed');
+const { rememberRestorableClosedSession, peekRestorableClosedSession, forgetRestorableClosedSession } = require('./recently-closed');
 const { pruneSessionFromGroups } = require('./tab-groups');
 const { shouldApplyStatusPanelUpdate } = require('./status-panel-state');
 const { getInitialSidebarState, getNextSidebarVisibilityState } = require('./sidebar-preferences');
@@ -37,6 +37,7 @@ let currentTheme = 'mocha';
 const openingSession = new Set();
 const cwdChangingSessions = new Set(); // sessions undergoing cwd change (suppress exit handling)
 const recentlyClosedSessions = []; // stack of session IDs closed by the user
+let restoringClosedTab = false;
 const sessionLastUsed = new Map();
 let creatingSession = false;
 const ipcCleanups = []; // unsubscribe fns for IPC listeners
@@ -245,10 +246,18 @@ function updateAgencyAvailabilityState(agencyAvailable, requestedValue = false) 
 }
 
 async function restoreMostRecentClosedTab() {
-  const validIds = await getAllValidSessionIds();
-  const sessionId = popRestorableClosedSession(recentlyClosedSessions, validIds);
-  if (sessionId) {
+  if (restoringClosedTab) return;
+  restoringClosedTab = true;
+  try {
+    const validIds = await getAllValidSessionIds();
+    const sessionId = peekRestorableClosedSession(recentlyClosedSessions, validIds);
+    if (!sessionId) return;
     await openSession(sessionId);
+    if (openTabIds.has(sessionId)) {
+      forgetRestorableClosedSession(recentlyClosedSessions, sessionId);
+    }
+  } finally {
+    restoringClosedTab = false;
   }
 }
 
@@ -1171,6 +1180,7 @@ async function init() {
       sessionOrder = settings.sessionOrder.filter(id => sessionAliveState.has(id));
     }
 
+    normalizeSessionOrderToActiveList();
     // Tabs were appended in openSession resolution order (which can differ
     // from saved sessionOrder due to Promise.allSettled). Realign now that
     // the canonical order is loaded so Ctrl+Tab and visual order agree.
@@ -2096,6 +2106,11 @@ function createSessionItem(session, group, index) {
       sessionList.querySelectorAll('.drop-above, .drop-below').forEach(x => x.classList.remove('drop-above', 'drop-below'));
     });
     el.addEventListener('dragover', (e) => {
+      const isSessionDrag = [...e.dataTransfer.types].includes('application/x-session-id');
+      if (!isSessionDrag) {
+        el.classList.remove('drop-above', 'drop-below');
+        return;
+      }
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       const rect = el.getBoundingClientRect();
@@ -2107,10 +2122,10 @@ function createSessionItem(session, group, index) {
       el.classList.remove('drop-above', 'drop-below');
     });
     el.addEventListener('drop', (e) => {
-      e.preventDefault();
       el.classList.remove('drop-above', 'drop-below');
       const draggedId = e.dataTransfer.getData('application/x-session-id');
       if (!draggedId || draggedId === session.id) return;
+      e.preventDefault();
       const rect = el.getBoundingClientRect();
       const above = e.clientY < rect.top + rect.height / 2;
       handleSessionReorder(draggedId, session.id, above, group);
@@ -2219,6 +2234,11 @@ function renderSessionList() {
       const headerEl = document.createElement('div');
       headerEl.className = 'session-group-header' + (group.collapsed ? ' collapsed' : '');
       headerEl.dataset.groupId = group.id;
+      headerEl.setAttribute('draggable', 'true');
+      headerEl.setAttribute('tabindex', '0');
+      headerEl.setAttribute('role', 'button');
+      headerEl.setAttribute('aria-expanded', group.collapsed ? 'false' : 'true');
+      headerEl.setAttribute('aria-label', `${group.name}, ${groupSessions.length} sessions. Press Enter to ${group.collapsed ? 'expand' : 'collapse'}, Alt+ArrowUp or Alt+ArrowDown to reorder.`);
       headerEl.innerHTML = `
         <span class="session-group-chevron">${group.collapsed ? '▸' : '▾'}</span>
         <span class="session-group-dot" style="background: ${group.color}"></span>
@@ -2231,6 +2251,32 @@ function renderSessionList() {
         renderSessionList();
         saveTabState();
       });
+      headerEl.addEventListener('keydown', (e) => {
+        if (e.target.getAttribute('contenteditable') === 'true') return;
+        if (e.altKey && e.key === 'ArrowUp') {
+          e.preventDefault();
+          moveGroupByOffset(group.id, -1);
+          return;
+        }
+        if (e.altKey && e.key === 'ArrowDown') {
+          e.preventDefault();
+          moveGroupByOffset(group.id, 1);
+          return;
+        }
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          group.collapsed = !group.collapsed;
+          renderSessionList();
+          saveTabState();
+          return;
+        }
+        if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+          e.preventDefault();
+          const rect = headerEl.getBoundingClientRect();
+          const menu = showGroupContextMenu({ clientX: rect.left + 12, clientY: rect.bottom, preventDefault() {} }, group.id);
+          menu?.querySelector('[role="menuitem"], [role="menuitemradio"]')?.focus();
+        }
+      });
       headerEl.addEventListener('dblclick', (e) => {
         e.stopPropagation();
         startGroupRename(group);
@@ -2239,17 +2285,50 @@ function renderSessionList() {
         e.preventDefault();
         showGroupContextMenu(e, group.id);
       });
+      headerEl.addEventListener('dragstart', (e) => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('application/x-group-id', group.id);
+        headerEl.classList.add('dragging');
+      });
+      headerEl.addEventListener('dragend', () => {
+        headerEl.classList.remove('dragging');
+        sessionList.querySelectorAll('.drag-over, .drop-above, .drop-below').forEach(x => x.classList.remove('drag-over', 'drop-above', 'drop-below'));
+      });
 
       // Make group header a drop target
       headerEl.addEventListener('dragover', (e) => {
+        const isGroupDrag = [...e.dataTransfer.types].includes('application/x-group-id');
+        const isSessionDrag = [...e.dataTransfer.types].includes('application/x-session-id');
+        if (!isGroupDrag && !isSessionDrag) {
+          headerEl.classList.remove('drag-over', 'drop-above', 'drop-below');
+          return;
+        }
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         headerEl.classList.add('drag-over');
+        if (isGroupDrag) {
+          const rect = headerEl.getBoundingClientRect();
+          const above = e.clientY < rect.top + rect.height / 2;
+          headerEl.classList.toggle('drop-above', above);
+          headerEl.classList.toggle('drop-below', !above);
+        } else {
+          headerEl.classList.remove('drop-above', 'drop-below');
+        }
       });
-      headerEl.addEventListener('dragleave', () => headerEl.classList.remove('drag-over'));
+      headerEl.addEventListener('dragleave', () => headerEl.classList.remove('drag-over', 'drop-above', 'drop-below'));
       headerEl.addEventListener('drop', (e) => {
+        const isGroupDrag = [...e.dataTransfer.types].includes('application/x-group-id');
+        const isSessionDrag = [...e.dataTransfer.types].includes('application/x-session-id');
+        if (!isGroupDrag && !isSessionDrag) return;
         e.preventDefault();
-        headerEl.classList.remove('drag-over');
+        const rect = headerEl.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        headerEl.classList.remove('drag-over', 'drop-above', 'drop-below');
+        const draggedGroupId = e.dataTransfer.getData('application/x-group-id');
+        if (draggedGroupId) {
+          handleGroupReorder(draggedGroupId, group.id, above);
+          return;
+        }
         const draggedId = e.dataTransfer.getData('application/x-session-id');
         if (draggedId) addTabToGroup(draggedId, group.id);
       });
@@ -2642,13 +2721,25 @@ function createTerminal(sessionId) {
     if (domSelection && domSelection.trim()) window.api.copyText(domSelection);
   });
 
-  // Defense-in-depth: suppress xterm's native paste handler.
-  // Primary fix is in main.js (custom menu without 'paste' role), but this
-  // catches any residual browser-level paste events that slip through.
+  // Defense-in-depth: own browser-level paste events too. Electron/Chromium can
+  // deliver Ctrl+V as a paste event instead of the xterm keydown path; suppress
+  // xterm's native handler, then write the clipboard text through the same PTY
+  // path as our keyboard shortcut.
   if (terminal.textarea) {
     terminal.textarea.addEventListener('paste', (e) => {
       e.preventDefault();
       e.stopImmediatePropagation();
+      const pasted = sanitizePasteText(e.clipboardData?.getData('text/plain'));
+      if (pasted) {
+        terminal.paste(pasted);
+        return;
+      }
+      window.api.pasteText().then(text => {
+        const sanitizedText = sanitizePasteText(text);
+        if (sanitizedText) {
+          terminal.paste(sanitizedText);
+        }
+      });
     }, true);
   }
 
@@ -2920,6 +3011,26 @@ function syncTabStripOrder() {
   for (const t of sorted) tabsScrollArea.appendChild(t);
 }
 
+function normalizeSessionOrderToActiveList() {
+  ensureSessionOrder();
+  if (tabGroups.length === 0) return;
+
+  const activeIds = new Set(sessionAliveState);
+  const groupedIds = new Set();
+  const groupedOrder = [];
+  for (const group of tabGroups) {
+    if (!Array.isArray(group.tabIds)) continue;
+    for (const id of group.tabIds) {
+      if (!activeIds.has(id) || groupedIds.has(id)) continue;
+      groupedIds.add(id);
+      groupedOrder.push(id);
+    }
+  }
+
+  const ungroupedOrder = sessionOrder.filter(id => activeIds.has(id) && !groupedIds.has(id));
+  sessionOrder = [...groupedOrder, ...ungroupedOrder];
+}
+
 function handleSessionReorder(draggedId, targetId, insertAbove, targetGroup) {
   ensureSessionOrder();
 
@@ -2957,11 +3068,37 @@ function handleSessionReorder(draggedId, targetId, insertAbove, targetGroup) {
     sessionOrder.push(draggedId);
   }
 
+  normalizeSessionOrderToActiveList();
   // Mirror the new order in the top tab strip so Ctrl+Tab cycles in
   // the same sequence the user just arranged in the sidebar.
   syncTabStripOrder();
   renderSessionList();
   saveTabState();
+}
+
+function handleGroupReorder(draggedGroupId, targetGroupId, insertAbove) {
+  if (!draggedGroupId || !targetGroupId || draggedGroupId === targetGroupId) return false;
+  const draggedIndex = tabGroups.findIndex(g => g.id === draggedGroupId);
+  if (draggedIndex === -1 || !tabGroups.some(g => g.id === targetGroupId)) return false;
+
+  const [draggedGroup] = tabGroups.splice(draggedIndex, 1);
+  const targetIndex = tabGroups.findIndex(g => g.id === targetGroupId);
+  tabGroups.splice(insertAbove ? targetIndex : targetIndex + 1, 0, draggedGroup);
+
+  normalizeSessionOrderToActiveList();
+  syncTabStripOrder();
+  renderSessionList();
+  saveTabState();
+  return true;
+}
+
+function moveGroupByOffset(groupId, offset) {
+  const index = tabGroups.findIndex(g => g.id === groupId);
+  const target = tabGroups[index + offset];
+  if (index === -1 || !target) return;
+  if (handleGroupReorder(groupId, target.id, offset < 0)) {
+    sessionList.querySelector(`.session-group-header[data-group-id="${groupId}"]`)?.focus();
+  }
 }
 
 // ───────────── Tab Grouping ─────────────
@@ -2985,6 +3122,8 @@ function createGroup(tabIds, name) {
     tabIds: tabIds || [],
   };
   tabGroups.push(group);
+  normalizeSessionOrderToActiveList();
+  syncTabStripOrder();
   renderSessionList();
   saveTabState();
   return group;
@@ -2999,6 +3138,8 @@ function removeGroup(groupId, closeTabs) {
     }
   }
   tabGroups = tabGroups.filter(g => g.id !== groupId);
+  normalizeSessionOrderToActiveList();
+  syncTabStripOrder();
   renderSessionList();
   saveTabState();
 }
@@ -3014,6 +3155,8 @@ function addTabToGroup(sessionId, groupId) {
   const group = tabGroups.find(g => g.id === groupId);
   if (group && !group.tabIds.includes(sessionId)) {
     group.tabIds.push(sessionId);
+    normalizeSessionOrderToActiveList();
+    syncTabStripOrder();
     renderSessionList();
     saveTabState();
   }
@@ -3021,6 +3164,8 @@ function addTabToGroup(sessionId, groupId) {
 
 function removeTabFromGroup(sessionId) {
   tabGroups = pruneSessionFromGroups(tabGroups, sessionId);
+  normalizeSessionOrderToActiveList();
+  syncTabStripOrder();
   renderSessionList();
   saveTabState();
 }
@@ -3047,6 +3192,43 @@ function showContextMenu(x, y, items) {
   const menu = document.createElement('div');
   menu.id = 'tab-context-menu';
   menu.className = 'context-menu';
+  menu.setAttribute('role', 'menu');
+
+  const focusableItems = () => [...menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"]')]
+    .filter(el => !el.closest('.hidden'));
+
+  const wireMenuItem = (el, action) => {
+    el.setAttribute('role', 'menuitem');
+    el.setAttribute('tabindex', '0');
+    el.addEventListener('click', () => {
+      action();
+      hideContextMenu();
+    });
+    el.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      action();
+      hideContextMenu();
+    });
+  };
+
+  menu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideContextMenu();
+      return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    const items = focusableItems();
+    if (items.length === 0) return;
+    const currentIndex = items.indexOf(document.activeElement);
+    const direction = event.key === 'ArrowDown' ? 1 : -1;
+    const nextIndex = currentIndex === -1
+      ? 0
+      : (currentIndex + direction + items.length) % items.length;
+    items[nextIndex].focus();
+  });
 
   for (const item of items) {
     if (item.separator) {
@@ -3065,9 +3247,19 @@ function showContextMenu(x, y, items) {
         if (c.value === item.currentColor) swatch.classList.add('selected');
         swatch.style.background = c.value;
         swatch.title = c.name;
-        swatch.addEventListener('click', () => {
+        swatch.setAttribute('role', 'menuitemradio');
+        swatch.setAttribute('tabindex', '0');
+        swatch.setAttribute('aria-label', c.name);
+        swatch.setAttribute('aria-checked', c.value === item.currentColor ? 'true' : 'false');
+        const selectColor = () => {
           item.onSelect(c.value);
           hideContextMenu();
+        };
+        swatch.addEventListener('click', selectColor);
+        swatch.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          selectColor();
         });
         colorsDiv.appendChild(swatch);
       }
@@ -3081,6 +3273,8 @@ function showContextMenu(x, y, items) {
       const trigger = document.createElement('div');
       trigger.className = 'context-menu-item';
       trigger.textContent = item.label + ' →';
+      trigger.setAttribute('role', 'menuitem');
+      trigger.setAttribute('tabindex', '0');
       submenuWrapper.appendChild(trigger);
 
       const sub = document.createElement('div');
@@ -3099,10 +3293,7 @@ function showContextMenu(x, y, items) {
         const labelSpan = document.createElement('span');
         labelSpan.textContent = subItem.label;
         subEl.appendChild(labelSpan);
-        subEl.addEventListener('click', () => {
-          subItem.action();
-          hideContextMenu();
-        });
+        wireMenuItem(subEl, subItem.action);
         sub.appendChild(subEl);
       }
       submenuWrapper.appendChild(sub);
@@ -3113,10 +3304,7 @@ function showContextMenu(x, y, items) {
     const el = document.createElement('div');
     el.className = 'context-menu-item';
     el.textContent = item.label;
-    el.addEventListener('click', () => {
-      item.action();
-      hideContextMenu();
-    });
+    wireMenuItem(el, item.action);
     menu.appendChild(el);
   }
 
@@ -3137,6 +3325,7 @@ function showContextMenu(x, y, items) {
     }
   };
   setTimeout(() => document.addEventListener('mousedown', closeHandler, true), 0);
+  return menu;
 }
 
 function showSessionContextMenu(e, sessionId) {
@@ -3179,7 +3368,7 @@ function showSessionContextMenu(e, sessionId) {
     });
   }
 
-  showContextMenu(e.clientX, e.clientY, items);
+  return showContextMenu(e.clientX, e.clientY, items);
 }
 
 function startGroupRename(group) {
@@ -3219,12 +3408,21 @@ function startGroupRename(group) {
 function showGroupContextMenu(e, groupId) {
   const group = tabGroups.find(g => g.id === groupId);
   if (!group) return;
+  const groupIndex = tabGroups.findIndex(g => g.id === groupId);
 
   const items = [
     {
       label: 'Rename group',
       action: () => startGroupRename(group),
     },
+    ...(groupIndex > 0 ? [{
+      label: 'Move group up',
+      action: () => moveGroupByOffset(groupId, -1),
+    }] : []),
+    ...(groupIndex >= 0 && groupIndex < tabGroups.length - 1 ? [{
+      label: 'Move group down',
+      action: () => moveGroupByOffset(groupId, 1),
+    }] : []),
     {
       label: 'Change color',
       colors: true,
@@ -3246,7 +3444,7 @@ function showGroupContextMenu(e, groupId) {
     },
   ];
 
-  showContextMenu(e.clientX, e.clientY, items);
+  return showContextMenu(e.clientX, e.clientY, items);
 }
 
 function removeTabFromGroupSilent(sessionId) {
