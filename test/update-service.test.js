@@ -436,6 +436,39 @@ describe('UpdateService', () => {
       expect(mockAutoUpdater.quitAndInstall).toHaveBeenCalledWith(false, true);
     });
 
+    it('surfaces a retryable error if quitAndInstall does not exit the app', async () => {
+      const mainWindow = makeMainWindow();
+      const pendingUpdatePath = makePendingUpdatePath();
+      const svc = new UpdateService(mainWindow, makeSettingsService(), {
+        autoUpdater: mockAutoUpdater,
+        currentVersion: '1.2.3',
+        ipcMain: mockIpc.ipcMain,
+        pendingUpdatePath,
+      });
+
+      mockAutoUpdater.handlers['update-downloaded']({ version: '1.2.4' });
+      svc.installUpdate();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockAutoUpdater.quitAndInstall).toHaveBeenCalledWith(false, true);
+
+      await vi.advanceTimersByTimeAsync(10000);
+
+      expect(existsSync(pendingUpdatePath)).toBe(true);
+      expect(mockIpc.handlers['update:getStatus']()).toMatchObject({
+        status: 'error',
+        info: { version: '1.2.4', releaseDate: undefined },
+        retryable: true,
+        error: 'DeepSky started the update installer, but the app did not exit. Please try Restart now again.',
+      });
+      expect(mainWindow.webContents.send).toHaveBeenLastCalledWith('update:status', {
+        status: 'error',
+        info: { version: '1.2.4', releaseDate: undefined },
+        progress: { percent: 0, indeterminate: true },
+        error: 'DeepSky started the update installer, but the app did not exit. Please try Restart now again.',
+        retryable: true,
+      });
+    });
+
     it('clears a pending install timer during dispose', async () => {
       const svc = new UpdateService(makeMainWindow(), makeSettingsService(), {
         autoUpdater: mockAutoUpdater,

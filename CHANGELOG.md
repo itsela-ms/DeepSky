@@ -4,6 +4,14 @@ All notable changes to DeepSky are documented here.
 
 ## [Unreleased]
 
+## [1.2.5-beta.1] - 2026-06-25
+
+### Added
+- **Restart now for downloaded updates** — the Updates settings panel now shows a button when an update is downloaded so users can trigger installation immediately instead of closing and reopening manually.
+
+### Fixed
+- **Updater install recovery is visible** — if the updater installer does not actually exit DeepSky after being triggered, the app now reports a retryable error and keeps the downloaded update marker so installation can be attempted again instead of leaving invisible/background processes.
+
 ## [1.2.4] - 2026-06-25
 
 ### Added

@@ -1,5 +1,6 @@
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const STARTUP_INSTALL_DELAY_MS = 500;
+const INSTALL_EXIT_WATCHDOG_MS = 10000;
 
 function parseVersion(version) {
   const match = String(version || '').trim().match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
@@ -63,8 +64,10 @@ class UpdateService {
     this.updateInfo = null;
     this.error = null;
     this.progress = null;
+    this.retryable = false;
     this._checkTimer = null;
     this._installTimer = null;
+    this._installExitWatchdog = null;
     this._downloadedUpdateReady = false;
     this._installCheckPromise = null;
     this.pendingUpdatePath = deps.pendingUpdatePath || this._resolvePendingUpdatePath();
@@ -83,6 +86,7 @@ class UpdateService {
         return;
       }
 
+      this.retryable = false;
       this.status = 'checking';
       this._send('update:status', { status: this.status });
     });
@@ -98,6 +102,7 @@ class UpdateService {
         return;
       }
 
+      this.retryable = false;
       this.status = 'available';
       this.updateInfo = { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes };
       this._send('update:status', { status: this.status, info: this.updateInfo });
@@ -110,6 +115,7 @@ class UpdateService {
         return;
       }
 
+      this.retryable = false;
       this.status = 'not-available';
       this.updateInfo = { version: info.version };
       this._send('update:status', { status: this.status, info: this.updateInfo });
@@ -122,6 +128,7 @@ class UpdateService {
         return;
       }
 
+      this.retryable = false;
       this.status = 'downloading';
       this.progress = { percent: progress.percent, transferred: progress.transferred, total: progress.total };
       this._send('update:status', { status: this.status, progress: this.progress });
@@ -147,6 +154,7 @@ class UpdateService {
         return;
       }
 
+      this.retryable = false;
       this.status = 'downloaded';
       this._send('update:status', { status: this.status, info: this.updateInfo });
     });
@@ -157,10 +165,15 @@ class UpdateService {
         clearTimeout(this._installTimer);
         this._installTimer = null;
       }
+      if (this._installExitWatchdog) {
+        clearTimeout(this._installExitWatchdog);
+        this._installExitWatchdog = null;
+      }
       if (wasInstalling) {
         this._clearPendingUpdate();
       }
       this.status = 'error';
+      this.retryable = false;
       this.error = err?.message || 'Unknown error';
       this._send('update:status', { status: this.status, error: this.error });
     });
@@ -264,6 +277,7 @@ class UpdateService {
         return await this.autoUpdater.checkForUpdates();
       } catch (err) {
         this.status = 'error';
+        this.retryable = false;
         this.error = err?.message || 'Failed to check for updates';
         this._send('update:status', { status: this.status, error: this.error });
         return { status: 'error', error: this.error };
@@ -275,7 +289,9 @@ class UpdateService {
     });
 
     this._ipcMain.handle('update:getStatus', () => {
-      return { status: this.status, info: this.updateInfo, progress: this.progress, error: this.error };
+      const status = { status: this.status, info: this.updateInfo, progress: this.progress, error: this.error };
+      if (this.retryable) status.retryable = true;
+      return status;
     });
 
     this._ipcMain.handle('update:applySettings', () => {
@@ -342,6 +358,7 @@ class UpdateService {
     }
 
     this.status = 'installing';
+    this.retryable = false;
     this.progress = { percent: 0, indeterminate: true };
     this.error = null;
     this._send('update:status', { status: this.status, info: this.updateInfo, progress: this.progress });
@@ -411,25 +428,49 @@ class UpdateService {
       if (this.status !== 'installing') return;
       try {
         this.autoUpdater.quitAndInstall(false, true);
+        this._installExitWatchdog = setTimeout(() => {
+          this._installExitWatchdog = null;
+          if (this.status === 'installing') {
+            this._setInstallError('DeepSky started the update installer, but the app did not exit. Please try Restart now again.', {
+              clearPending: false,
+              retryable: true,
+            });
+          }
+        }, INSTALL_EXIT_WATCHDOG_MS);
       } catch (err) {
         this._clearPendingUpdate();
         this._applySettings();
         this.status = 'error';
+        this.retryable = false;
         this.error = err?.message || 'Failed to install update';
         this._send('update:status', { status: this.status, error: this.error });
       }
     }, STARTUP_INSTALL_DELAY_MS);
   }
 
-  _setInstallError(message) {
+  _setInstallError(message, { clearPending = true, retryable = false } = {}) {
     if (this._installTimer) {
       clearTimeout(this._installTimer);
       this._installTimer = null;
     }
-    this._clearPendingUpdate();
+    if (this._installExitWatchdog) {
+      clearTimeout(this._installExitWatchdog);
+      this._installExitWatchdog = null;
+    }
+    if (clearPending) {
+      this._clearPendingUpdate();
+    }
     this.status = 'error';
+    this.retryable = retryable;
     this.error = message || 'Failed to install update';
-    this._send('update:status', { status: this.status, error: this.error });
+    const status = {
+      status: this.status,
+      info: this.updateInfo,
+      progress: this.progress,
+      error: this.error,
+    };
+    if (retryable) status.retryable = true;
+    this._send('update:status', status);
   }
 
   dispose() {
@@ -440,6 +481,10 @@ class UpdateService {
     if (this._installTimer) {
       clearTimeout(this._installTimer);
       this._installTimer = null;
+    }
+    if (this._installExitWatchdog) {
+      clearTimeout(this._installExitWatchdog);
+      this._installExitWatchdog = null;
     }
     this._installCheckPromise = null;
   }

@@ -31,6 +31,8 @@ const MAIN_SRC = readFileSync(join(ROOT, 'src', 'main.js'), 'utf8');
 const PRELOAD_SRC = readFileSync(join(ROOT, 'src', 'preload.js'), 'utf8');
 const PTY_MANAGER_SRC = readFileSync(join(ROOT, 'src', 'pty-manager.js'), 'utf8');
 const STYLES_SRC = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8');
+const INDEX_SRC = readFileSync(join(ROOT, 'src', 'index.html'), 'utf8');
+const UPDATE_SERVICE_SRC = readFileSync(join(ROOT, 'src', 'update-service.js'), 'utf8');
 
 // ───────────────────────────────────────────────────────────────────────────
 // Terminal link handling — double-open + hover-cursor regression guard
@@ -235,9 +237,22 @@ describe('startup update install — regression guardrails', () => {
     expect(block).not.toMatch(/startupLoading\.fail/);
   });
 
-  it('describes downloaded updates as next-launch installs, not quit-time installs', () => {
-    expect(RENDERER_SRC).toMatch(/before DeepSky opens on next launch/);
+  it('offers an explicit restart action for downloaded updates', () => {
+    expect(INDEX_SRC).toMatch(/id="btn-update-install"/);
+    expect(STYLES_SRC).toMatch(/\.btn-update\.hidden\s*\{\s*display:\s*none;\s*\}/);
+    expect(RENDERER_SRC).toMatch(/function installDownloadedUpdateNow\(\)/);
+    expect(RENDERER_SRC).toMatch(/btnUpdateInstall\?\.addEventListener\(['"]click['"]/);
+    expect(RENDERER_SRC).toMatch(/Restart now to install/);
     expect(RENDERER_SRC).not.toMatch(/next quit|next time you close DeepSky/i);
+  });
+
+  it('recovers visibly if the updater install command does not exit the app', () => {
+    expect(UPDATE_SERVICE_SRC).toMatch(/INSTALL_EXIT_WATCHDOG_MS/);
+    expect(UPDATE_SERVICE_SRC).toMatch(/DeepSky started the update installer, but the app did not exit/);
+    expect(UPDATE_SERVICE_SRC).toMatch(/clearPending:\s*false/);
+    expect(UPDATE_SERVICE_SRC).toMatch(/retryable:\s*true/);
+    expect(RENDERER_SRC).toMatch(/data\.retryable && data\.info\?\.version && btnUpdateInstall/);
+    expect(RENDERER_SRC).toMatch(/Try restart again/);
   });
 
   it('keeps startup progress usable with reduced motion and forced-colors modes', () => {

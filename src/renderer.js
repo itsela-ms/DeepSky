@@ -178,6 +178,7 @@ const copyOnSelectToggle = document.getElementById('copy-on-select');
 const betaChannelToggle = document.getElementById('beta-channel');
 const betaChannelLabel = document.getElementById('beta-channel-label');
 const betaChannelRow = document.getElementById('beta-channel-row');
+const btnUpdateInstall = document.getElementById('btn-update-install');
 const agencyLauncherRow = document.getElementById('agency-launcher-row');
 const agencyLauncherDesc = document.getElementById('agency-launcher-desc');
 
@@ -311,6 +312,21 @@ async function installPendingUpdateOnStartup() {
   if (!startupInstallInProgress || installResult?.status === 'error') return false;
   showStartupUpdateInstallStatus(updateData, 35);
   return true;
+}
+
+async function installDownloadedUpdateNow() {
+  const updateData = await window.api.getUpdateStatus();
+  const canInstall = updateData?.status === 'downloaded' ||
+    updateData?.status === 'pending-install' ||
+    (updateData?.status === 'error' && updateData?.info?.version);
+  if (!canInstall) return;
+
+  startupInstallInProgress = true;
+  closeSettings();
+  showStartupUpdateInstallStatus(updateData, updateData.status === 'pending-install' ? 12 : 20);
+  const installResult = await window.api.installUpdate();
+  if (!startupInstallInProgress || installResult?.status === 'error') return;
+  showStartupUpdateInstallStatus(installResult, 35);
 }
 
 function waitForStartupPaint() {
@@ -1404,6 +1420,10 @@ function handleUpdateStatus(data) {
 
   statusEl.classList.remove('hidden');
   progressEl.classList.add('hidden');
+  if (btnUpdateInstall) {
+    btnUpdateInstall.classList.add('hidden');
+    btnUpdateInstall.disabled = false;
+  }
 
   switch (data.status) {
     case 'checking':
@@ -1425,13 +1445,21 @@ function handleUpdateStatus(data) {
       progressBar.style.width = `${data.progress?.percent || 0}%`;
       break;
     case 'downloaded':
-      statusEl.textContent = `${getUpdateVersionLabel(data.info)} will be installed before DeepSky opens on next launch.`;
+      statusEl.textContent = `${getUpdateVersionLabel(data.info)} is downloaded and ready to install.`;
       statusEl.className = 'update-status update-available';
+      if (btnUpdateInstall) {
+        btnUpdateInstall.textContent = `Restart now to install ${getUpdateVersionLabel(data.info)}`;
+        btnUpdateInstall.classList.remove('hidden');
+      }
       setUpdateBadge(true, data.info?.version, true);
       break;
     case 'pending-install':
-      statusEl.textContent = `${getUpdateVersionLabel(data.info)} will be installed before DeepSky opens.`;
+      statusEl.textContent = `${getUpdateVersionLabel(data.info)} is ready to install.`;
       statusEl.className = 'update-status update-available';
+      if (btnUpdateInstall) {
+        btnUpdateInstall.textContent = `Restart now to install ${getUpdateVersionLabel(data.info)}`;
+        btnUpdateInstall.classList.remove('hidden');
+      }
       setUpdateBadge(true, data.info?.version, false);
       break;
     case 'installing':
@@ -1439,11 +1467,21 @@ function handleUpdateStatus(data) {
       statusEl.className = 'update-status update-available';
       progressEl.classList.remove('hidden');
       progressBar.style.width = '35%';
+      if (btnUpdateInstall) {
+        btnUpdateInstall.textContent = 'Restarting...';
+        btnUpdateInstall.disabled = true;
+        btnUpdateInstall.classList.remove('hidden');
+      }
       if (startupInstallInProgress) showStartupUpdateInstallStatus(data, 35);
       break;
     case 'error':
       statusEl.textContent = `Update error: ${data.error}`;
       statusEl.className = 'update-status update-error';
+      if (data.retryable && data.info?.version && btnUpdateInstall) {
+        btnUpdateInstall.textContent = `Try restart again for ${getUpdateVersionLabel(data.info)}`;
+        btnUpdateInstall.disabled = false;
+        btnUpdateInstall.classList.remove('hidden');
+      }
       if (startupInstallInProgress) {
         recoverFromStartupInstallError(data.error);
       }
@@ -4638,6 +4676,17 @@ autoUpdateToggle.addEventListener('change', (e) => {
   betaChannelRow.classList.toggle('disabled', !e.target.checked);
   betaChannelToggle.disabled = !e.target.checked;
   window.api.applyUpdateSettings();
+});
+
+btnUpdateInstall?.addEventListener('click', () => {
+  installDownloadedUpdateNow().catch((error) => {
+    console.error('Failed to start update install', error);
+    showToast({
+      type: 'error',
+      title: 'Update install failed',
+      body: error?.message || 'DeepSky could not start the update installer.',
+    });
+  });
 });
 
 copyOnSelectToggle.addEventListener('change', (e) => {
