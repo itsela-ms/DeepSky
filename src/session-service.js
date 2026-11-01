@@ -2,12 +2,14 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const readline = require('readline');
+const { randomUUID } = require('crypto');
 const { readPreferredSessionCwd } = require('./session-cwd');
-const { HISTORY_SESSION_LIMIT, getHistoryScopeCutoff } = require('./history-limit');
+const { HISTORY_SESSION_LIMIT, HISTORY_PAGE_SIZE, getHistoryScopeCutoff } = require('./history-limit');
 const { parseLauncherArgs } = require('./app-support');
 class SessionService {
-  constructor(sessionStateDir) {
+  constructor(sessionStateDir, settingsService = null) {
     this.dir = sessionStateDir;
+    this.settingsService = settingsService;
     this.m_workspaceMetaWrites = new Map();
     // Cache _loadSession results keyed by entry.name.
     // value = { fingerprint, session } where fingerprint encodes per-file
@@ -16,11 +18,20 @@ class SessionService {
     // events.jsonl streaming, and cwd resolution — a meaningful win when
     // pollSessionStatus fires every 3s and most sessions haven't changed.
     this._sessionCache = new Map();
+    this._historyCatalogs = new Map();
   }
 
   _invalidateSessionCache(sessionId) {
     if (!sessionId) return;
     this._sessionCache.delete(sessionId);
+  }
+
+  invalidateSessionCache() {
+    this._sessionCache.clear();
+  }
+
+  _autoSessionTitlesEnabled() {
+    return this.settingsService?.get?.().autoSessionTitles !== false;
   }
 
   _getSessionDir(sessionId) {
@@ -60,7 +71,7 @@ class SessionService {
     await fs.promises.rename(tempPath, yamlPath);
   }
 
-  async _updateWorkspaceMeta(sessionId, updater) {
+  async _updateWorkspaceMeta(sessionId, updater, afterWrite = null) {
     const sessionDir = this._getSessionDir(sessionId);
     const previous = this.m_workspaceMetaWrites.get(sessionId) || Promise.resolve();
     const next = previous
@@ -70,6 +81,18 @@ class SessionService {
         const updated = await updater({ ...meta });
         await this._writeWorkspaceMeta(sessionDir, updated);
         this._invalidateSessionCache(sessionId);
+        if (afterWrite) {
+          try {
+            await afterWrite();
+          } catch (error) {
+            try {
+              await this._writeWorkspaceMeta(sessionDir, meta);
+            } catch (rollbackError) {
+              throw new AggregateError([error, rollbackError], 'Session rename failed and workspace metadata could not be restored.');
+            }
+            throw error;
+          }
+        }
         return updated;
       });
 
@@ -129,7 +152,12 @@ class SessionService {
 
   async listSessions(options = {}) {
     const scope = this._normalizeListScope(options);
-    const dirs = await this._readSessionEntries();
+    const dirs = Array.isArray(options.ids)
+      ? [...new Set(options.ids)].map(id => {
+        this._getSessionDir(id);
+        return { name: id };
+      })
+      : await this._readSessionEntries();
     let entriesToLoad = dirs.map(entry => ({ entry, lastModifiedHint: 0 }));
 
     if (scope === 'history') {
@@ -164,6 +192,57 @@ class SessionService {
         .slice(0, HISTORY_SESSION_LIMIT);
     }
     return sessions;
+  }
+
+  async listHistoryPage({ scope = 'history', cursor = null, excludeIds = [] } = {}) {
+    if (!['history', 'all'].includes(scope)) throw new Error('Invalid history scope.');
+    let catalog;
+    let offset = 0;
+    let snapshotId;
+    if (cursor) {
+      snapshotId = cursor.snapshotId;
+      offset = cursor.offset;
+      catalog = this._historyCatalogs.get(snapshotId);
+      if (!catalog || catalog.scope !== scope || !Number.isInteger(offset) ||
+          offset < 0 || offset > catalog.entries.length) {
+        throw new Error('History page expired. Use Refresh history to reload.');
+      }
+    } else {
+      const dirs = await this._readSessionEntries();
+      const cutoff = scope === 'history' ? getHistoryScopeCutoff().getTime() : 0;
+      const candidates = await Promise.all(dirs.map(async entry => ({
+        entry, lastModifiedHint: await this._getSessionLastModifiedHint(entry),
+      })));
+      const excluded = new Set(excludeIds);
+      let entries = candidates
+        .filter(item => item.lastModifiedHint >= cutoff && !excluded.has(item.entry.name))
+        .sort((a, b) => b.lastModifiedHint - a.lastModifiedHint || a.entry.name.localeCompare(b.entry.name));
+      if (scope === 'history') entries = entries.slice(0, HISTORY_SESSION_LIMIT);
+      catalog = { scope, entries, cutoff };
+      snapshotId = randomUUID();
+      this._historyCatalogs.set(snapshotId, catalog);
+      if (this._historyCatalogs.size > 8) this._historyCatalogs.delete(this._historyCatalogs.keys().next().value);
+    }
+
+    // Keep a stable inventory across pages, loading metadata only for this batch.
+    const sessions = [];
+    const excluded = new Set(excludeIds);
+    while (sessions.length < HISTORY_PAGE_SIZE && offset < catalog.entries.length) {
+      const batch = catalog.entries.slice(offset, offset + HISTORY_PAGE_SIZE - sessions.length);
+      offset += batch.length;
+      const loaded = await Promise.all(batch.map(async item => {
+        if (excluded.has(item.entry.name)) return null;
+        const session = await this._loadSession(item.entry, item.lastModifiedHint);
+        if (!session) return null;
+        const updated = Date.parse(session.updatedAt);
+        return (Number.isFinite(updated) ? updated : session.lastModified) >= catalog.cutoff ? session : null;
+      }));
+      sessions.push(...loaded.filter(Boolean));
+    }
+    return {
+      sessions,
+      nextCursor: offset < catalog.entries.length ? { snapshotId, offset } : null,
+    };
   }
 
   async searchSessions(query) {
@@ -277,36 +356,31 @@ class SessionService {
 
       let title = null;
       let isCustomTitle = false;
-      let customTitleMtimeMs = 0;
 
       const customTitlePath = path.join(sessionDir, '.deepsky-title');
       try {
-        const [customTitle, customTitleStat] = await Promise.all([
-          fs.promises.readFile(customTitlePath, 'utf8'),
-          fs.promises.stat(customTitlePath),
-        ]);
+        const customTitle = await fs.promises.readFile(customTitlePath, 'utf8');
         title = customTitle.trim();
         isCustomTitle = !!title;
-        customTitleMtimeMs = customTitleStat.mtimeMs;
       } catch {
         // No legacy custom title — fall through to workspace metadata
       }
 
-      if (!title || (typeof meta.name === 'string' && meta.name.trim() && customTitleMtimeMs < yamlStat.mtimeMs)) {
+      if (!title && this._autoSessionTitlesEnabled()) {
         title = typeof meta.name === 'string' && meta.name.trim()
           ? meta.name.trim()
           : null;
         if (title) isCustomTitle = false;
       }
 
-      if (!title) {
+      if (!title && this._autoSessionTitlesEnabled()) {
         title = typeof meta.summary === 'string' && meta.summary.trim()
           ? meta.summary.trim()
           : null;
       }
 
       // If no workspace title, try to extract from first user message in events.jsonl
-      if (!title) {
+      if (!title && this._autoSessionTitlesEnabled()) {
         title = await this._extractTitleFromEvents(sessionDir);
       }
 
@@ -783,12 +857,23 @@ class SessionService {
 
   async renameSession(sessionId, title) {
     const sessionDir = this._getSessionDir(sessionId);
-    await this._updateWorkspaceMeta(sessionId, (meta) => ({
-      ...meta,
-      name: title.trim(),
-    }));
-    await fs.promises.rm(path.join(sessionDir, '.deepsky-title'), { force: true }).catch(() => {});
-    this._invalidateSessionCache(sessionId);
+    const normalizedTitle = title.trim();
+    const titlePath = path.join(sessionDir, '.deepsky-title');
+    const tempTitlePath = path.join(
+      sessionDir,
+      `.deepsky-title.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+    );
+    await fs.promises.mkdir(sessionDir, { recursive: true });
+    try {
+      await fs.promises.writeFile(tempTitlePath, normalizedTitle, 'utf8');
+      await this._updateWorkspaceMeta(sessionId, (meta) => ({
+        ...meta,
+        name: normalizedTitle,
+      }), () => fs.promises.rename(tempTitlePath, titlePath));
+    } finally {
+      await fs.promises.rm(tempTitlePath, { force: true });
+      this._invalidateSessionCache(sessionId);
+    }
   }
 
   async deleteSession(sessionId) {

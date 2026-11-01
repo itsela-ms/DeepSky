@@ -231,7 +231,7 @@
                 <span class="settings-row-title">Max open sessions</span>
                 <span class="settings-row-desc">Older sessions are closed when the limit is reached</span>
               </div>
-              <input type="number" id="max-concurrent" class="settings-number" min="1" max="20" value="5">
+              <input type="number" id="max-concurrent" class="settings-number" min="1" max="50" value="5">
             </div>
             <div class="settings-row" id="agency-launcher-row">
               <div class="settings-row-text">
@@ -251,6 +251,16 @@
             </div>
             <div class="settings-input-row settings-args-row">
               <input type="text" id="copilot-args" placeholder="Example: --agent squad" aria-labelledby="copilot-args-title" aria-describedby="copilot-args-desc">
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <span class="settings-row-title" id="auto-session-titles-title">Automatically update session titles</span>
+                <span class="settings-row-desc" id="auto-session-titles-desc">Allow Copilot workspace metadata to rename sessions. Manual DeepSky titles are always preserved.</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="auto-session-titles" aria-labelledby="auto-session-titles-title" aria-describedby="auto-session-titles-desc">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
           </div>
 

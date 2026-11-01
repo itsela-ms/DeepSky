@@ -13,6 +13,7 @@ const STATUS_CACHE_TTL_MS = 2000;
 class StatusService {
   constructor(sessionStateDir, deps = {}) {
     this.sessionStateDir = sessionStateDir;
+    this.artifactRoot = deps.artifactRoot || path.join(path.dirname(sessionStateDir), 'files');
     this.cache = new Map(); // sessionId → { data, mtimeMs, readAt }
     this._execFile = deps.execFile || promisify(execFile);
   }
@@ -482,15 +483,8 @@ class StatusService {
   }
 
   async _readGeneratedFiles(sessionDir) {
-    const filesDir = path.join(sessionDir, 'files');
-    try {
-      await fs.promises.access(filesDir);
-    } catch {
-      return [];
-    }
-
     const entries = [];
-    const walk = async (dir) => {
+    const walk = async (dir, root, source) => {
       const children = await fs.promises.readdir(dir, { withFileTypes: true });
       for (const child of children) {
         const childPath = path.join(dir, child.name);
@@ -498,28 +492,40 @@ class StatusService {
           continue;
         }
         if (child.isDirectory()) {
-          await walk(childPath);
+          await walk(childPath, root, source);
           continue;
         }
         if (!child.isFile()) continue;
         const stat = await fs.promises.stat(childPath);
         const ext = path.extname(child.name).replace(/^\./, '').toLowerCase();
         if (!['html', 'htm', 'pdf'].includes(ext)) continue;
-        const relativePath = path.relative(sessionDir, childPath).replace(/\\/g, '/');
+        const relativePath = path.relative(root, childPath).replace(/\\/g, '/');
         entries.push({
           name: child.name,
           path: relativePath,
           ext,
           modifiedAt: stat.mtime.toISOString(),
           size: stat.size,
+          ...(source === 'artifacts' ? { source } : {}),
         });
       }
     };
 
-    try {
-      await walk(filesDir);
-    } catch {
-      return [];
+    for (const { dir, root, source } of [
+      { dir: path.join(sessionDir, 'files'), root: sessionDir, source: 'session' },
+      { dir: path.join(this.artifactRoot, path.basename(sessionDir)), root: path.join(this.artifactRoot, path.basename(sessionDir)), source: 'artifacts' },
+    ]) {
+      try {
+        if (source === 'artifacts') {
+          const rootStat = await fs.promises.lstat(this.artifactRoot);
+          if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) continue;
+        }
+        const stat = await fs.promises.lstat(dir);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+        await walk(dir, root, source);
+      } catch (error) {
+        if (error.code !== 'ENOENT') console.warn('Could not discover generated session files:', dir, error);
+      }
     }
 
     const priority = (ext) => {

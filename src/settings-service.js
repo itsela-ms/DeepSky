@@ -2,6 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const { parseLauncherArgs } = require('./app-support');
 
+const MAX_CONCURRENT_MIN = 1;
+const MAX_CONCURRENT_MAX = 50;
+
 const DEFAULTS = {
   maxConcurrent: 5,
   sidebarWidth: 280,
@@ -21,6 +24,7 @@ const DEFAULTS = {
   defaultWorkdir: '', // default working directory for new sessions; empty = user home
   useAgencyCopilot: false, // launch new sessions via `agency copilot` instead of the default copilot command
   copilotArgs: '', // extra args passed to the selected launcher for new sessions
+  autoSessionTitles: true, // allow Copilot workspace metadata to update non-custom session titles
   copyOnSelect: true, // automatically copy terminal text to clipboard when selected with the mouse
   autoUpdateEnabled: true, // false = no update checks or downloads
   updateChannel: 'stable', // 'stable' | 'beta'
@@ -37,13 +41,19 @@ class SettingsService {
       const data = await fs.promises.readFile(this.configPath, 'utf8');
       const saved = JSON.parse(data);
       this.settings = { ...DEFAULTS, ...saved };
-      if (this._normalizeLauncherArgsSettings()) {
+      if (this._normalizeSettings()) {
         await this.save();
       }
     } catch {
       this.settings = { ...DEFAULTS };
     }
     return this.settings;
+  }
+
+  _normalizeSettings() {
+    const launcherChanged = this._normalizeLauncherArgsSettings();
+    const maxConcurrentChanged = this._normalizeMaxConcurrentSetting();
+    return launcherChanged || maxConcurrentChanged;
   }
 
   _normalizeLauncherArgsSettings() {
@@ -67,6 +77,17 @@ class SettingsService {
     return changed;
   }
 
+  _normalizeMaxConcurrentSetting() {
+    const current = this.settings.maxConcurrent;
+    const parsed = Number(current);
+    const normalized = Number.isFinite(parsed)
+      ? Math.min(MAX_CONCURRENT_MAX, Math.max(MAX_CONCURRENT_MIN, Math.trunc(parsed)))
+      : DEFAULTS.maxConcurrent;
+    if (current === normalized) return false;
+    this.settings.maxConcurrent = normalized;
+    return true;
+  }
+
   async save() {
     try {
       const dir = path.dirname(this.configPath);
@@ -84,6 +105,7 @@ class SettingsService {
     const filtered = {};
     for (const key of allowed) { if (key in partial) filtered[key] = partial[key]; }
     Object.assign(this.settings, filtered);
+    this._normalizeSettings();
     await this.save();
     return { ...this.settings };
   }

@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   // Sessions
   listSessions: (options) => ipcRenderer.invoke('sessions:list', options),
+  listHistoryPage: (options) => ipcRenderer.invoke('sessions:historyPage', options),
   searchSessions: (query) => ipcRenderer.invoke('sessions:search', query),
   getLastUserPrompt: (sessionId, options) => ipcRenderer.invoke('session:getLastUserPrompt', sessionId, options),
   renameSession: (sessionId, title) => ipcRenderer.invoke('session:rename', sessionId, title),
@@ -13,7 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   getSessionDirectoryAvailability: (sessionId) => ipcRenderer.invoke('session:getDirectoryAvailability', sessionId),
   openSessionDirectory: (sessionId) => ipcRenderer.invoke('session:openDirectory', sessionId),
   openSessionFilesDirectory: (sessionId) => ipcRenderer.invoke('session:openFilesDirectory', sessionId),
-  openGeneratedFile: (sessionId, relativePath) => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath),
+  openGeneratedFile: (sessionId, relativePath, source = 'session') => ipcRenderer.invoke('session:openGeneratedFile', sessionId, relativePath, source),
   openSession: (sessionId) => ipcRenderer.invoke('session:open', sessionId),
   newSession: (request) => ipcRenderer.invoke('session:new', request),
   killSession: (sessionId) => ipcRenderer.invoke('pty:kill', sessionId),

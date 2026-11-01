@@ -328,7 +328,7 @@ if (!hasSingleInstanceLock) {
 
   const startupSettings = settingsService.get();
   const copilotExe = resolveEffectiveCopilotPath(startupSettings) || (startupSettings.copilotPath ? '' : COPILOT_PATH);
-  sessionService = new SessionService(SESSION_STATE_DIR);
+  sessionService = new SessionService(SESSION_STATE_DIR, settingsService);
   ptyManager = new PtyManager(copilotExe, settingsService, undefined, { agencyPath: resolveAgencyInfo().path });
 
   tagIndexer = new TagIndexer(SESSION_STATE_DIR);
@@ -525,8 +525,12 @@ if (!hasSingleInstanceLock) {
       parseLauncherArgs(sanitized.copilotArgs);
     }
     delete sanitized.agencyCopilotArgs;
+    const titleSettingsChanged = 'autoSessionTitles' in sanitized;
     const launchSettingsChanged = 'useAgencyCopilot' in sanitized || 'defaultWorkdir' in sanitized || 'promptForWorkdir' in sanitized || 'copilotArgs' in sanitized || 'copilotPath' in sanitized;
     const updated = await settingsService.update(sanitized);
+    if (titleSettingsChanged) {
+      sessionService.invalidateSessionCache();
+    }
     ptyManager.updateSettings(updated, launchSettingsChanged);
     if (launchSettingsChanged) {
       scheduleWarmUp();
@@ -782,8 +786,13 @@ if (!hasSingleInstanceLock) {
 
   const hydrateSessionsCache = async (options = {}) => {
     const scope = normalizeSessionListScope(options);
+    const activeIds = [...new Set([
+      ...(settingsService.get().openTabs || []),
+      ...ptyManager.getActiveSessions().map(session => session.id),
+      ...(Array.isArray(options.activeIds) ? options.activeIds : []),
+    ])];
     const sessions = await sessionService.listSessions(
-      scope === 'history' ? { scope: 'history' } : scope === 'all' ? { scope: 'all' } : undefined
+      scope === 'history' ? { scope: 'history' } : scope === 'all' ? { scope: 'all' } : { ids: activeIds }
     );
     const hydratedSessions = sessions.map(s => ({
       ...s,
@@ -791,7 +800,7 @@ if (!hasSingleInstanceLock) {
       resources: resourceIndexer.getResourcesForSession(s.id)
     }));
 
-    if (scope === 'history') {
+    if (scope !== 'all') {
       mergeSessionsCache(hydratedSessions);
       return hydratedSessions;
     }
@@ -801,14 +810,31 @@ if (!hasSingleInstanceLock) {
   };
 
   // IPC: Get session list (with tags and resources) — also caches for notification titles
-  ipcMain.handle('sessions:list', hydrateSessionsCache);
+  ipcMain.handle('sessions:list', (event, options) => hydrateSessionsCache(options));
+  ipcMain.handle('sessions:historyPage', async (event, options = {}) => {
+    const page = await sessionService.listHistoryPage({
+      ...options,
+      excludeIds: [...new Set([
+        ...(settingsService.get().openTabs || []),
+        ...ptyManager.getActiveSessions().map(session => session.id),
+        ...(Array.isArray(options.excludeIds) ? options.excludeIds : []),
+      ])],
+    });
+    const sessions = page.sessions.map(session => ({
+      ...session,
+      tags: tagIndexer.getTagsForSession(session.id),
+      resources: resourceIndexer.getResourcesForSession(session.id),
+    }));
+    mergeSessionsCache(sessions);
+    return { ...page, sessions };
+  });
 
   ipcMain.handle('sessions:search', async (event, query) => {
     const needle = String(query || '').trim().toLowerCase();
     if (!needle) return [];
 
     const [sessions, contentMatches] = await Promise.all([
-      hydrateSessionsCache(),
+      hydrateSessionsCache({ scope: 'all' }),
       sessionService.searchSessions(needle)
     ]);
     const contentMatchIds = new Set(contentMatches.map(match => match.id));
@@ -882,9 +908,9 @@ if (!hasSingleInstanceLock) {
     }
   });
 
-  ipcMain.handle('session:openGeneratedFile', async (event, sessionId, relativePath) => {
+  ipcMain.handle('session:openGeneratedFile', async (event, sessionId, relativePath, source = 'session') => {
     try {
-      const targetRealPath = await resolveGeneratedFilePath(SESSION_STATE_DIR, sessionId, relativePath);
+      const targetRealPath = await resolveGeneratedFilePath(SESSION_STATE_DIR, sessionId, relativePath, { source });
       const error = await shell.openPath(targetRealPath);
       return error ? { ok: false, error } : { ok: true };
     } catch (error) {

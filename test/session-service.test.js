@@ -238,7 +238,7 @@ describe('SessionService', () => {
       expect(sess.title).toBe('Summary title');
     });
 
-    it('prefers a newer workspace name over an older legacy DeepSky title', async () => {
+    it('preserves a custom DeepSky title over a newer workspace name', async () => {
       await createSession('title-manual', 'name: Copilot Rename\nsummary: Summary title', {
         deepskyTitle: 'Manual DeepSky Rename'
       });
@@ -246,7 +246,21 @@ describe('SessionService', () => {
       await writeWorkspaceYaml('title-manual', 'name: New Workspace Name\nsummary: Summary title');
       const sessions = await svc.listSessions();
       const sess = sessions.find(s => s.id === 'title-manual');
-      expect(sess.title).toBe('New Workspace Name');
+      expect(sess.title).toBe('Manual DeepSky Rename');
+    });
+
+    it('does not use workspace metadata titles when automatic session titles are disabled', async () => {
+      let autoSessionTitles = false;
+      svc = new SessionService(tmpDir, { get: () => ({ autoSessionTitles }) });
+      await createSession('title-disabled', 'name: Copilot Rename\nsummary: Summary title');
+      const disabledSessions = await svc.listSessions();
+      expect(disabledSessions.find(s => s.id === 'title-disabled').title).toBe('Session title-di');
+
+      autoSessionTitles = true;
+      svc.invalidateSessionCache();
+      await writeWorkspaceYaml('title-disabled', 'name: Updated Copilot Rename\nsummary: Summary title');
+      const enabledSessions = await svc.listSessions();
+      expect(enabledSessions.find(s => s.id === 'title-disabled').title).toBe('Updated Copilot Rename');
     });
   });
 
@@ -294,10 +308,47 @@ describe('SessionService', () => {
       expect(content).toContain('name: Renamed in DeepSky');
     });
 
-    it('removes the legacy .deepsky-title file after writing workspace name', async () => {
+    it('replaces the legacy .deepsky-title file after writing workspace name', async () => {
       await createSession('rename-migrate', 'summary: Old summary', { deepskyTitle: 'Legacy title' });
       await svc.renameSession('rename-migrate', 'Renamed in DeepSky');
-      await expect(fs.promises.access(path.join(tmpDir, 'rename-migrate', '.deepsky-title'))).rejects.toThrow();
+      const title = await fs.promises.readFile(path.join(tmpDir, 'rename-migrate', '.deepsky-title'), 'utf8');
+      expect(title).toBe('Renamed in DeepSky');
+    });
+
+    it('keeps a manual DeepSky rename when workspace metadata changes later', async () => {
+      await createSession('rename-lock', 'summary: Old summary');
+      await svc.renameSession('rename-lock', 'Manual Title');
+      await writeWorkspaceYaml('rename-lock', 'name: Later Copilot Title\nsummary: Old summary');
+      const sessions = await svc.listSessions();
+      expect(sessions.find(s => s.id === 'rename-lock').title).toBe('Manual Title');
+    });
+
+    it('does not leave a durable custom title lock when workspace rename fails', async () => {
+      await createSession('rename-fails', 'summary: Old summary');
+      svc._writeWorkspaceMeta = vi.fn().mockRejectedValue(new Error('disk full'));
+      await expect(svc.renameSession('rename-fails', 'Failed Manual Title')).rejects.toThrow('disk full');
+
+      const files = await fs.promises.readdir(path.join(tmpDir, 'rename-fails'));
+      expect(files).not.toContain('.deepsky-title');
+      expect(files.some(file => file.startsWith('.deepsky-title.') && file.endsWith('.tmp'))).toBe(false);
+    });
+
+    it('restores workspace metadata and cleans temp files when title lock replacement fails', async () => {
+      await createSession('rename-lock-fails', 'name: Original\ncwd: /original', { deepskyTitle: 'Original custom' });
+      const originalRename = fs.promises.rename.bind(fs.promises);
+      const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation((source, target) => {
+        if (path.basename(target) === '.deepsky-title') return Promise.reject(new Error('lock unavailable'));
+        return originalRename(source, target);
+      });
+      try {
+        await expect(svc.renameSession('rename-lock-fails', 'Replacement')).rejects.toThrow('lock unavailable');
+        expect(await readWorkspaceYaml('rename-lock-fails')).toContain('name: Original');
+        const dir = path.join(tmpDir, 'rename-lock-fails');
+        expect(await fs.promises.readFile(path.join(dir, '.deepsky-title'), 'utf8')).toBe('Original custom');
+        expect((await fs.promises.readdir(dir)).some(file => file.endsWith('.tmp'))).toBe(false);
+      } finally {
+        renameSpy.mockRestore();
+      }
     });
 
     it('serializes workspace updates so rename and cwd changes do not clobber each other', async () => {

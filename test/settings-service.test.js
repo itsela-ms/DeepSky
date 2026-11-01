@@ -39,6 +39,10 @@ describe('SettingsService', () => {
       expect(svc.get().copilotArgs).toBe('');
     });
 
+    it('automatic session titles default to enabled', () => {
+      expect(svc.get().autoSessionTitles).toBe(true);
+    });
+
     it('statusPanelSections defaults to null', () => {
       expect(svc.get().statusPanelSections).toBeNull();
     });
@@ -80,6 +84,13 @@ describe('SettingsService', () => {
       expect(svc2.get().agencyCopilotArgs).toBeUndefined();
     });
 
+    it('persists automatic session title preference across load', async () => {
+      await svc.update({ autoSessionTitles: false });
+      const svc2 = new SettingsService(tmpDir);
+      await svc2.load();
+      expect(svc2.get().autoSessionTitles).toBe(false);
+    });
+
     it('persists statusPanelSections across load', async () => {
       await svc.update({ statusPanelSections: { summary: true, generatedFiles: true } });
       const svc2 = new SettingsService(tmpDir);
@@ -99,6 +110,16 @@ describe('SettingsService', () => {
       const svc2 = new SettingsService(tmpDir);
       await svc2.load();
       expect(svc2.get().activeSessions).toEqual(['session-a', 'session-b']);
+    });
+
+    it('caps maxConcurrent at the supported upper bound', async () => {
+      await svc.update({ maxConcurrent: 500 });
+      expect(svc.get().maxConcurrent).toBe(50);
+    });
+
+    it('normalizes invalid maxConcurrent values to the default', async () => {
+      await svc.update({ maxConcurrent: 'not-a-number' });
+      expect(svc.get().maxConcurrent).toBe(5);
     });
 
     it('rejects unknown settings keys', async () => {
@@ -122,6 +143,13 @@ describe('SettingsService', () => {
       await svc.load();
       expect(svc.get().maxConcurrent).toBe(3);
       expect(svc.get().promptForWorkdir).toBe(false); // default fills in
+    });
+
+    it('normalizes saved maxConcurrent values on load', async () => {
+      const configPath = path.join(tmpDir, 'session-gui-settings.json');
+      await fs.promises.writeFile(configPath, JSON.stringify({ maxConcurrent: 500 }), 'utf8');
+      await svc.load();
+      expect(svc.get().maxConcurrent).toBe(50);
     });
 
     it('migrates malformed launcher args and removes the old agency-specific setting on load', async () => {

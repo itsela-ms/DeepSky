@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 const {
   HISTORY_SESSION_LIMIT,
   HISTORY_SESSION_MONTH_WINDOW,
+  HISTORY_PAGE_SIZE,
   getHistoryEmptyState,
   getHistoryScopeActionLabel,
   getHistoryScopeNotice,
@@ -12,14 +13,14 @@ const {
 describe('history-limit helpers', () => {
   it('uses bounded-history copy without the old explicit-ask wording', () => {
     expect(getHistoryScopeNotice()).toBe(
-      `History shows up to ${HISTORY_SESSION_LIMIT} sessions from the last ${HISTORY_SESSION_MONTH_WINDOW} months by default.`
+      `History loads ${HISTORY_PAGE_SIZE} sessions at a time, up to ${HISTORY_SESSION_LIMIT} from the last ${HISTORY_SESSION_MONTH_WINDOW} months.`
     );
     expect(getHistoryScopeNotice()).not.toMatch(/ask explicitly/i);
   });
 
   it('switches the notice when all history is visible', () => {
     expect(getHistoryScopeStatusNotice(false)).toBe(getHistoryScopeNotice());
-    expect(getHistoryScopeStatusNotice(true)).toBe('Showing all saved history.');
+    expect(getHistoryScopeStatusNotice(true)).toBe(`Showing all saved history, ${HISTORY_PAGE_SIZE} sessions at a time.`);
   });
 
   it('provides toggle labels for recent vs full history', () => {

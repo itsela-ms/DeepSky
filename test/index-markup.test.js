@@ -88,6 +88,13 @@ describe('index.html accessibility regressions', () => {
     expect(html).toContain('aria-describedby="agency-launcher-desc"');
   });
 
+  it('labels the automatic session title toggle for assistive technology', () => {
+    expect(html).toContain('id="auto-session-titles"');
+    expect(html).toContain('id="auto-session-titles-title"');
+    expect(html).toContain('aria-labelledby="auto-session-titles-title"');
+    expect(html).toContain('aria-describedby="auto-session-titles-desc"');
+  });
+
   it('does not hide the visible session context from assistive technology', () => {
     const promptGhost = html.match(/<div id="terminal-prompt-ghost"[^>]*>/)?.[0] || '';
     expect(promptGhost).not.toContain('aria-hidden');

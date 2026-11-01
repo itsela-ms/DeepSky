@@ -1,5 +1,7 @@
 const HISTORY_SESSION_LIMIT = 500;
 const HISTORY_SESSION_MONTH_WINDOW = 3;
+const HISTORY_PAGE_SIZE = 100;
+const HISTORY_PRELOAD_REMAINING = 50;
 
 function getHistoryScopeCutoff(now = new Date()) {
   const cutoff = new Date(now);
@@ -8,12 +10,12 @@ function getHistoryScopeCutoff(now = new Date()) {
 }
 
 function getHistoryScopeNotice() {
-  return `History shows up to ${HISTORY_SESSION_LIMIT} sessions from the last ${HISTORY_SESSION_MONTH_WINDOW} months by default.`;
+  return `History loads ${HISTORY_PAGE_SIZE} sessions at a time, up to ${HISTORY_SESSION_LIMIT} from the last ${HISTORY_SESSION_MONTH_WINDOW} months.`;
 }
 
 function getHistoryScopeStatusNotice(showAll = false) {
   if (showAll) {
-    return 'Showing all saved history.';
+    return `Showing all saved history, ${HISTORY_PAGE_SIZE} sessions at a time.`;
   }
   return getHistoryScopeNotice();
 }
@@ -31,6 +33,8 @@ function getHistoryEmptyState(showAll = false) {
 module.exports = {
   HISTORY_SESSION_LIMIT,
   HISTORY_SESSION_MONTH_WINDOW,
+  HISTORY_PAGE_SIZE,
+  HISTORY_PRELOAD_REMAINING,
   getHistoryScopeCutoff,
   getHistoryEmptyState,
   getHistoryScopeActionLabel,

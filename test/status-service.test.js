@@ -11,7 +11,7 @@ let execFileMock;
 beforeEach(async () => {
   tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'deepsky-status-'));
   execFileMock = vi.fn(async () => ({ stdout: '', stderr: '' }));
-  svc = new StatusService(tmpDir, { execFile: execFileMock });
+  svc = new StatusService(tmpDir, { execFile: execFileMock, artifactRoot: path.join(tmpDir, 'artifacts') });
 });
 
 afterEach(async () => {
@@ -252,6 +252,45 @@ describe('StatusService next step summaries', () => {
 });
 
 describe('StatusService generated files', () => {
+  it('discovers both report locations without dropping same-named files or mixing sessions', async () => {
+    await writeGeneratedFile('dual-reports', 'report.html', '<html>session</html>');
+    const artifacts = path.join(tmpDir, 'artifacts', 'dual-reports', 'nested');
+    await fs.promises.mkdir(artifacts, { recursive: true });
+    await fs.promises.writeFile(path.join(artifacts, 'report.html'), '<html>artifact</html>');
+    await fs.promises.writeFile(path.join(artifacts, 'ignored.json'), '{}');
+    await fs.promises.mkdir(path.join(tmpDir, 'artifacts', 'other-session'), { recursive: true });
+    await fs.promises.writeFile(path.join(tmpDir, 'artifacts', 'other-session', 'unrelated.html'), 'other');
+
+    const status = await svc.getSessionStatus('dual-reports');
+    expect(status.generatedFiles).toHaveLength(2);
+    expect(status.generatedFiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'files/report.html' }),
+      expect.objectContaining({ path: 'nested/report.html', source: 'artifacts' }),
+    ]));
+  });
+
+  it('discovers reports when only the separate artifact folder exists', async () => {
+    const artifacts = path.join(tmpDir, 'artifacts', 'artifact-only');
+    await fs.promises.mkdir(artifacts, { recursive: true });
+    await fs.promises.writeFile(path.join(artifacts, 'report.html'), '<html></html>');
+    const status = await svc.getSessionStatus('artifact-only');
+    expect(status.generatedFiles).toEqual([
+      expect.objectContaining({ path: 'report.html', source: 'artifacts' }),
+    ]);
+  });
+
+  it('does not follow a symlinked artifact-session folder', async () => {
+    await writeGeneratedFile('artifact-link', 'safe.html', 'safe');
+    const outside = path.join(tmpDir, 'outside-reports');
+    await fs.promises.mkdir(outside);
+    await fs.promises.writeFile(path.join(outside, 'outside.html'), 'outside');
+    await fs.promises.mkdir(path.join(tmpDir, 'artifacts'), { recursive: true });
+    await fs.promises.symlink(outside, path.join(tmpDir, 'artifacts', 'artifact-link'),
+      process.platform === 'win32' ? 'junction' : 'dir');
+    const status = await svc.getSessionStatus('artifact-link');
+    expect(status.generatedFiles.map(file => file.path)).toEqual(['files/safe.html']);
+  });
+
   it('returns only user-targeted reports from the session files folder', async () => {
     await writeGeneratedFile('generated-files', 'reports/validation.html', '<html></html>');
     await writeGeneratedFile('generated-files', 'notes/output.json', '{"ok":true}');

@@ -48,15 +48,19 @@ function resolveGeneratedFilePath(sessionStateDir, sessionId, relativePath, deps
   const {
     realpathImpl = fs.promises.realpath,
     lstatImpl = fs.promises.lstat,
+    source = 'session',
   } = deps;
 
-  if (!isValidSessionId(sessionId) || typeof relativePath !== 'string' || !relativePath.trim()) {
+  if (!isValidSessionId(sessionId) || typeof relativePath !== 'string' || !relativePath.trim() ||
+      !['session', 'artifacts'].includes(source)) {
     throw new Error('Invalid generated file request.');
   }
 
-  const sessionRoot = path.resolve(sessionStateDir);
+  const sessionRoot = source === 'artifacts'
+    ? path.resolve(sessionStateDir, '..', 'files')
+    : path.resolve(sessionStateDir);
   const sessionDir = path.resolve(sessionRoot, sessionId);
-  const filesRoot = path.resolve(sessionDir, 'files');
+  const filesRoot = source === 'artifacts' ? sessionDir : path.resolve(sessionDir, 'files');
   const targetPath = path.resolve(sessionDir, relativePath);
   if (!targetPath.startsWith(filesRoot + path.sep) && targetPath !== filesRoot) {
     throw new Error('Generated file must be inside the session files folder.');
@@ -68,8 +72,10 @@ function resolveGeneratedFilePath(sessionStateDir, sessionId, relativePath, deps
     realpathImpl(targetPath),
     lstatImpl(filesRoot),
     lstatImpl(targetPath),
-  ]).then(([sessionRootRealPath, filesRootRealPath, targetRealPath, filesRootStat, targetStat]) => {
+    source === 'artifacts' ? lstatImpl(sessionRoot) : null,
+  ]).then(([sessionRootRealPath, filesRootRealPath, targetRealPath, filesRootStat, targetStat, artifactRootStat]) => {
     if (
+      (source === 'artifacts' && (artifactRootStat.isSymbolicLink() || !artifactRootStat.isDirectory())) ||
       filesRootStat.isSymbolicLink() ||
       !filesRootStat.isDirectory() ||
       (!filesRootRealPath.startsWith(sessionRootRealPath + path.sep) && filesRootRealPath !== sessionRootRealPath) ||

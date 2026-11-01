@@ -20,7 +20,7 @@
  * the change.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -34,6 +34,32 @@ const APP_SUPPORT_SRC = readFileSync(join(ROOT, 'src', 'app-support.js'), 'utf8'
 const STYLES_SRC = readFileSync(join(ROOT, 'src', 'styles.css'), 'utf8');
 const INDEX_SRC = readFileSync(join(ROOT, 'src', 'index.html'), 'utf8');
 const UPDATE_SERVICE_SRC = readFileSync(join(ROOT, 'src', 'update-service.js'), 'utf8');
+
+describe('automatic session title settings', () => {
+  it('refreshes session titles immediately after saving the preference', async () => {
+    const source = RENDERER_SRC.slice(
+      RENDERER_SRC.indexOf("autoSessionTitlesInput?.addEventListener('change'"),
+      RENDERER_SRC.indexOf("promptWorkdirInput.addEventListener('change'")
+    );
+    let handler;
+    const settings = { autoSessionTitles: false };
+    const window = { api: { updateSettings: vi.fn().mockResolvedValue(settings) } };
+    const applySettingsToControls = vi.fn();
+    const refreshSessionList = vi.fn().mockResolvedValue();
+    const showToast = vi.fn();
+    const invalidateSidebarSessionSnapshots = vi.fn();
+    new Function('autoSessionTitlesInput', 'window', 'applySettingsToControls', 'refreshSessionList', 'showToast', 'invalidateSidebarSessionSnapshots', source)(
+      { addEventListener: (_, callback) => { handler = callback; } },
+      window, applySettingsToControls, refreshSessionList, showToast, invalidateSidebarSessionSnapshots
+    );
+    await handler({ target: { checked: false } });
+    expect(window.api.updateSettings).toHaveBeenCalledWith(settings);
+    expect(applySettingsToControls).toHaveBeenCalledWith(settings);
+    expect(refreshSessionList).toHaveBeenCalledOnce();
+    expect(invalidateSidebarSessionSnapshots).toHaveBeenCalledOnce();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+});
 
 // ───────────────────────────────────────────────────────────────────────────
 // Terminal link handling — double-open + hover-cursor regression guard

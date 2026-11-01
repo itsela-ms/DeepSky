@@ -17,6 +17,7 @@ const {
   getHistoryEmptyState,
   getHistoryScopeActionLabel,
   getHistoryScopeStatusNotice,
+  HISTORY_PRELOAD_REMAINING,
 } = require('./history-limit');
 const { getRecentChangelogReleases } = require('./changelog-utils');
 const { createStartupLoadingController } = require('./startup-loading');
@@ -244,6 +245,7 @@ const btnNewCenter = document.getElementById('btn-new-center');
 const maxConcurrentInput = document.getElementById('max-concurrent');
 const useAgencyCopilotInput = document.getElementById('use-agency-copilot');
 const copilotArgsInput = document.getElementById('copilot-args');
+const autoSessionTitlesInput = document.getElementById('auto-session-titles');
 const promptWorkdirInput = document.getElementById('prompt-workdir');
 const defaultWorkdirInput = document.getElementById('default-workdir');
 const btnPickDefaultWorkdir = document.getElementById('btn-pick-default-workdir');
@@ -484,6 +486,7 @@ function applySettingsToControls(settings, { includeSidebar = false } = {}) {
   window._cachedSettings = { ...(window._cachedSettings || {}), ...settings };
   maxConcurrentInput.value = settings.maxConcurrent;
   if (copilotArgsInput) copilotArgsInput.value = settings.copilotArgs || '';
+  if (autoSessionTitlesInput) autoSessionTitlesInput.checked = settings.autoSessionTitles !== false;
   promptWorkdirInput.checked = !!settings.promptForWorkdir;
   defaultWorkdirInput.value = settings.defaultWorkdir || '';
   autoUpdateToggle.checked = settings.autoUpdateEnabled !== false;
@@ -929,6 +932,19 @@ function appendHistoryScopeNotice() {
 
   noticeEl.appendChild(copyEl);
   noticeEl.appendChild(actionEl);
+  const refreshEl = document.createElement('button');
+  refreshEl.type = 'button';
+  refreshEl.className = 'history-refresh-action history-scope-action';
+  refreshEl.textContent = 'Refresh history';
+  noticeEl.appendChild(refreshEl);
+  if (!searchQuery) {
+    const snapshot = sidebarSessionCache.get(getSidebarSessionScope());
+    const progress = document.createElement('div');
+    progress.className = 'history-page-status';
+    progress.setAttribute('role', 'status');
+    progress.textContent = `${snapshot?.sessions.length || 0} sessions loaded${snapshot?.nextCursor ? ' — scroll for more' : ''}`;
+    noticeEl.appendChild(progress);
+  }
   sessionList.appendChild(noticeEl);
 }
 
@@ -1022,11 +1038,16 @@ function focusSidebarSearch() {
 let _titleClickTimeout = null;
 let _titleClickSessionId = null;
 sessionList.addEventListener('click', (e) => {
+  if (e.target.closest('.history-refresh-action')) {
+    e.stopPropagation();
+    void refreshSessionList().catch(reportSidebarRefreshError);
+    return;
+  }
   const historyScopeAction = e.target.closest('.history-scope-action');
   if (historyScopeAction) {
     e.stopPropagation();
     historyShowsAll = !historyShowsAll;
-    void refreshSessionList();
+    void refreshSessionList({ useCached: true }).catch(reportSidebarRefreshError);
     return;
   }
   const closeBtn = e.target.closest('.session-close');
@@ -1249,10 +1270,11 @@ async function init() {
   // Sidebar tab switching
   document.querySelectorAll('.sidebar-tab').forEach(tab => {
     tab.addEventListener('click', () => {
+      if (currentSidebarTab === tab.dataset.tab) return;
       currentSidebarTab = tab.dataset.tab;
       document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      void refreshSessionList();
+      void refreshSessionList({ useCached: true }).catch(reportSidebarRefreshError);
       window.api.updateSettings({ lastActiveTab: currentSidebarTab });
     });
   });
@@ -1930,24 +1952,136 @@ function showStatusDiffPopover(anchorEl, diffText) {
   popover.style.top = `${top}px`;
 }
 
-async function refreshSessionList() {
-  allSessions = await window.api.listSessions({ scope: getSidebarSessionScope() });
+const sidebarSessionCache = new Map();
+const sidebarSessionReads = new Map();
+const sidebarReadVersions = new Map();
+const historyPageReads = new Map();
+const SIDEBAR_SNAPSHOT_FRESH_MS = 5000;
+let sidebarRefreshSeq = 0;
+
+function reportSidebarRefreshError(error) {
+  console.warn('Could not refresh sidebar sessions:', error);
+  showToast({ type: 'error', title: 'Could not refresh sessions', body: String(error?.message || error) });
+}
+
+function invalidateSidebarSessionSnapshots() {
+  sidebarRefreshSeq++;
+  for (const [scope, version] of sidebarReadVersions) sidebarReadVersions.set(scope, version + 1);
+  sidebarSessionReads.clear();
+  sidebarSessionCache.clear();
+  sidebarListDomCache.clear();
+}
+
+function readSidebarSessionSnapshot(scope) {
+  const paged = scope !== 'active' && !(currentSidebarTab === 'history' && searchQuery);
+  const readKey = `${scope}:${paged ? 'page' : 'list'}`;
+  const inFlight = sidebarSessionReads.get(readKey);
+  if (inFlight && inFlight.version === sidebarReadVersions.get(scope)) return inFlight.promise;
+  const version = (sidebarReadVersions.get(scope) || 0) + 1;
+  sidebarReadVersions.set(scope, version);
+  const request = paged
+    ? window.api.listHistoryPage({ scope, excludeIds: [...getActiveSidebarIds()] })
+    : window.api.listSessions({ scope, ...(scope === 'active' ? { activeIds: [...getActiveSidebarIds()] } : {}) })
+      .then(sessions => ({ sessions }));
+  const pending = request.then(({ sessions, nextCursor = null }) => {
+    const snapshot = { sessions, nextCursor, paged, readAt: Date.now() };
+    if (sidebarReadVersions.get(scope) !== version) return snapshot;
+    const updated = new Map(sessions.map(session => [session.id, session]));
+    for (const [cachedScope, cached] of sidebarSessionCache) {
+      if (cachedScope === scope) continue;
+      cached.sessions = cached.sessions
+        .map(session => updated.get(session.id) || session);
+    }
+    sidebarSessionCache.set(scope, snapshot);
+    return snapshot;
+  }).finally(() => {
+    if (sidebarSessionReads.get(readKey)?.promise === pending) sidebarSessionReads.delete(readKey);
+  });
+  sidebarSessionReads.set(readKey, { version, promise: pending });
+  return pending;
+}
+
+function applySidebarSessionSnapshot(snapshot) {
+  const sessions = [...snapshot.sessions];
+  const ids = new Set(sessions.map(session => session.id));
+  const activeIds = getActiveSidebarIds();
+  for (const session of allSessions) {
+    if (!ids.has(session.id) && activeIds.has(session.id)) sessions.push(session);
+  }
+  allSessions = sessions;
   mergePendingSessionStarts();
-  const validIds = new Set([...allSessions.map(s => s.id), ...terminals.keys(), ...pendingSessionStarts.keys()]);
   for (const session of allSessions) {
     if (terminals.has(session.id)) {
       updateTabTitle(session.id, session.title);
     }
   }
-  // Prune stale entries from tracking maps
-  for (const id of sessionLastUsed.keys()) {
-    if (!validIds.has(id)) sessionLastUsed.delete(id);
-  }
-  await updateSessionBusyStates();
-  scheduleRenderSessionList();
+  // A page is not the full inventory: retain last-used order for unloaded sessions.
   updateSessionPromptGhost(activeSessionId);
   if (!activeSessionId) emptyState.classList.remove('hidden');
 }
+
+async function refreshSessionList({ useCached = false } = {}) {
+  const scope = getSidebarSessionScope();
+  const requestId = ++sidebarRefreshSeq;
+  const cached = sidebarSessionCache.get(scope);
+  if (useCached && cached) {
+    applySidebarSessionSnapshot(cached);
+    renderSessionList();
+    if (cached.paged || Date.now() - cached.readAt < SIDEBAR_SNAPSHOT_FRESH_MS) return;
+  } else if (useCached) {
+    // Never leave Active rows under a selected History tab during a cold read.
+    sessionList.innerHTML = '<div class="empty-list" role="status">Loading sessions...</div>';
+    _lastSidebarFingerprint = null;
+  }
+
+  const snapshot = await readSidebarSessionSnapshot(scope);
+  if (requestId !== sidebarRefreshSeq || scope !== getSidebarSessionScope()) return;
+  applySidebarSessionSnapshot(snapshot);
+  scheduleRenderSessionList();
+
+  const preloadScope = scope === 'active' ? 'history' : 'active';
+  if (!sidebarSessionCache.has(preloadScope)) {
+    void readSidebarSessionSnapshot(preloadScope).catch(reportSidebarRefreshError);
+  }
+  await updateSessionBusyStates();
+  if (requestId === sidebarRefreshSeq && scope === getSidebarSessionScope()) {
+    scheduleRenderSessionList();
+  }
+}
+
+function maybePreloadHistoryPage() {
+  if (currentSidebarTab !== 'history' || searchQuery || isSessionListRenderLocked()) return;
+  const scope = getSidebarSessionScope();
+  const snapshot = sidebarSessionCache.get(scope);
+  if (!snapshot?.nextCursor || historyPageReads.has(scope)) return;
+  const rows = sessionList.querySelectorAll('.session-item');
+  const threshold = Math.max(0, rows.length - HISTORY_PRELOAD_REMAINING - 1);
+  const marker = rows[threshold];
+  if (!marker || marker.getBoundingClientRect().top > sessionList.getBoundingClientRect().bottom) return;
+  void loadNextHistoryPage(scope, snapshot).catch(reportSidebarRefreshError);
+}
+
+function loadNextHistoryPage(scope, snapshot) {
+  if (historyPageReads.has(scope)) return historyPageReads.get(scope);
+  const pending = window.api.listHistoryPage({
+    scope, cursor: snapshot.nextCursor, excludeIds: [...getActiveSidebarIds()],
+  }).then(page => {
+    if (sidebarSessionCache.get(scope) !== snapshot) return;
+    const sessions = new Map(snapshot.sessions.map(session => [session.id, session]));
+    page.sessions.forEach(session => sessions.set(session.id, session));
+    snapshot.sessions = [...sessions.values()];
+    snapshot.nextCursor = page.nextCursor;
+    if (currentSidebarTab !== 'history' || scope !== getSidebarSessionScope() || searchQuery) return;
+    const scrollTop = sessionList.scrollTop;
+    applySidebarSessionSnapshot(snapshot);
+    renderSessionList();
+    sessionList.scrollTop = scrollTop;
+  }).finally(() => historyPageReads.delete(scope));
+  historyPageReads.set(scope, pending);
+  return pending;
+}
+
+sessionList.addEventListener('scroll', maybePreloadHistoryPage, { passive: true });
 
 // Compact, stable fingerprint of everything that affects the sidebar DOM
 // structure (NOT badges or active highlight — those are patched in place).
@@ -1955,6 +2089,7 @@ async function refreshSessionList() {
 // safely skip the destructive innerHTML='' + rebuild.
 function computeSidebarFingerprint(displayed) {
   const parts = [
+    new Date().toDateString(),
     currentSidebarTab,
     searchQuery || '',
     sidebarCollapsed ? '1' : '0',
@@ -1970,10 +2105,8 @@ function computeSidebarFingerprint(displayed) {
     displayed
       .map(s => {
         const tags = Array.isArray(s.tags) ? s.tags.join(',') : '';
-        const res = Array.isArray(s.resources)
-          ? s.resources.map(r => `${r.type || ''}:${r.id || ''}`).join(',')
-          : '';
-        return `${s.id}|${s.title || ''}|${s.lastAssistantHasPR ? 1 : 0}|${tags}|${res}`;
+        const res = JSON.stringify(s.resources || []);
+        return `${s.id}|${s.title || ''}|${s.cwd || ''}|${s.updatedAt || ''}|${sessionLastUsed.get(s.id) || ''}|${sessionAliveState.has(s.id) ? 1 : 0}|${pendingSessionStarts.has(s.id) ? 1 : 0}|${s.lastAssistantHasPR ? 1 : 0}|${tags}|${res}`;
       })
       .join(';'),
   ];
@@ -2368,8 +2501,15 @@ function schedulePatchSessionStateBadges(sessionId = null) {
 }
 
 async function pollSessionStatus() {
+  void refreshOpenSessionStatuses();
   if (terminals.size > 0) {
-    await refreshSessionList();
+    const cachedHistory = currentSidebarTab === 'history' && !searchQuery &&
+      sidebarSessionCache.get(getSidebarSessionScope())?.paged;
+    await refreshSessionList({ useCached: cachedHistory });
+    if (cachedHistory) {
+      await updateSessionBusyStates();
+      scheduleRenderSessionList();
+    }
   } else {
     await updateSessionBusyStates();
   }
@@ -2396,6 +2536,10 @@ function scheduleRenderSessionList() {
   });
 }
 
+const sidebarTimeFormatter = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+const sidebarDateFormatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const sidebarListDomCache = new Map();
+
 function createSessionItem(session, group, index) {
   const el = document.createElement('div');
   el.className = 'session-item';
@@ -2421,9 +2565,9 @@ function createSessionItem(session, group, index) {
   const lastUsedTime = sessionLastUsed.get(session.id);
   const lastUsedDate = new Date(lastUsedTime || session.updatedAt);
   const isToday = lastUsedDate.toDateString() === new Date().toDateString();
-  const timeStr = isToday
-    ? lastUsedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-    : lastUsedDate.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + lastUsedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const timeStr = Number.isNaN(lastUsedDate.getTime()) ? 'Invalid Date' : isToday
+    ? sidebarTimeFormatter.format(lastUsedDate)
+    : sidebarDateFormatter.format(lastUsedDate) + ' ' + sidebarTimeFormatter.format(lastUsedDate);
 
   let tagsHtml = '';
   const allPills = [];
@@ -2566,7 +2710,9 @@ function renderSessionList() {
       activeSessionIds: activeIds,
       currentSidebarTab
     });
-    displayed.sort((a, b) => (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0));
+    if (!sidebarSessionCache.get(getSidebarSessionScope())?.paged) {
+      displayed.sort((a, b) => (sessionLastUsed.get(b.id) || 0) - (sessionLastUsed.get(a.id) || 0));
+    }
   }
 
   // Filter by search (title + tags + resources)
@@ -2582,6 +2728,14 @@ function renderSessionList() {
   // remain real-time. Only triggered when the sidebar has already been rendered
   // at least once and the DOM is non-empty.
   const fingerprint = computeSidebarFingerprint(displayed);
+  const updateHistoryProgress = () => {
+    const progress = sessionList.querySelector('.history-page-status');
+    const snapshot = sidebarSessionCache.get(getSidebarSessionScope());
+    if (progress && snapshot) {
+      const text = `${snapshot.sessions.length} sessions loaded${snapshot.nextCursor ? ' — scroll for more' : ''}`;
+      if (progress.textContent !== text) progress.textContent = text;
+    }
+  };
   if (
     _lastSidebarFingerprint !== null &&
     fingerprint === _lastSidebarFingerprint &&
@@ -2589,9 +2743,33 @@ function renderSessionList() {
   ) {
     try { patchActiveHighlight && patchActiveHighlight(); } catch (_) { /* noop */ }
     try { patchSessionStateBadges && patchSessionStateBadges(); } catch (_) { /* noop */ }
+    updateHistoryProgress();
     return;
   }
   _lastSidebarFingerprint = fingerprint;
+
+  const cacheKey = getSidebarSessionScope();
+  const cachedDom = sidebarListDomCache.get(cacheKey);
+  if (cachedDom?.fingerprint === fingerprint) {
+    sessionList.replaceChildren(...cachedDom.nodes);
+    patchActiveHighlight();
+    patchSessionStateBadges();
+    updateHistoryProgress();
+    return;
+  }
+
+  if (currentSidebarTab === 'history' && !searchQuery && cachedDom?.rowCount > 0 &&
+      cachedDom.rowCount < displayed.length && cachedDom.nodes[0]?.parentNode === sessionList &&
+      cachedDom.fingerprint === computeSidebarFingerprint(displayed.slice(0, cachedDom.rowCount))) {
+    const fragment = document.createDocumentFragment();
+    displayed.slice(cachedDom.rowCount).forEach((session, index) => {
+      fragment.appendChild(createSessionItem(session, null, cachedDom.rowCount + index));
+    });
+    sessionList.appendChild(fragment);
+    updateHistoryProgress();
+    sidebarListDomCache.set(cacheKey, { fingerprint, rowCount: displayed.length, nodes: [...sessionList.childNodes] });
+    return;
+  }
 
   sessionList.innerHTML = '';
   appendHistoryScopeNotice();
@@ -2603,6 +2781,7 @@ function renderSessionList() {
         ? 'No active sessions. Click a session in History or start a new one.'
         : searchQuery ? 'No sessions match your search.' : getHistoryEmptyState(historyShowsAll);
     sessionList.appendChild(emptyEl);
+    sidebarListDomCache.set(cacheKey, { fingerprint, rowCount: displayed.length, nodes: [...sessionList.childNodes] });
     return;
   }
 
@@ -2767,6 +2946,7 @@ function renderSessionList() {
   // Keep `renderSeq` reference so the variable is intentionally consumed if
   // future async work needs to be guarded against stale renders.
   void renderSeq;
+  sidebarListDomCache.set(cacheKey, { fingerprint, rowCount: displayed.length, nodes: [...sessionList.childNodes] });
 }
 
 function startRenameSession(sessionId, titleEl) {
@@ -2916,6 +3096,9 @@ function confirmDeleteSession(sessionId, title) {
       await terminateSession(sessionId);
     }
     await window.api.deleteSession(sessionId);
+    for (const snapshot of sidebarSessionCache.values()) {
+      snapshot.sessions = snapshot.sessions.filter(session => session.id !== sessionId);
+    }
     await refreshSessionList();
   });
 
@@ -3240,6 +3423,7 @@ function createTerminal(sessionId) {
     pendingMouseTrackingSequence: '',
     pendingMouseTrackingStateSequence: ''
   });
+  void refreshOpenSessionStatuses();
   scheduleTerminalViewportSync(sessionId);
   scheduleSessionPromptGhostRefresh(sessionId, [0, 400]);
 }
@@ -4041,6 +4225,83 @@ function renderResourceItems(resources) {
   }).join('');
 }
 
+const statusPanelCache = new Map();
+const statusPanelReads = new Map();
+let statusPreloadRunning = false;
+const STATUS_SNAPSHOT_REFRESH_MS = 15000;
+
+function readStatusPanelSnapshot(sessionId) {
+  if (statusPanelReads.has(sessionId)) return statusPanelReads.get(sessionId);
+  const pending = (async () => {
+    const cached = statusPanelCache.get(sessionId);
+    const [statusData, directoryAvailability] = await Promise.all([
+      window.api.getSessionStatus(sessionId).catch((error) => {
+        console.warn('Could not load session status:', error);
+        return null;
+      }),
+      window.api.getSessionDirectoryAvailability(sessionId).catch((error) => {
+        console.warn('Could not load session directory availability:', error);
+        return null;
+      }),
+    ]);
+    const snapshot = {
+      statusData: statusData || cached?.statusData || null,
+      directoryAvailability: directoryAvailability || cached?.directoryAvailability || {
+        sessionDirectoryAvailable: false,
+        filesDirectoryAvailable: false,
+      },
+      readAt: Date.now(),
+    };
+    if (statusData && directoryAvailability) {
+      statusPanelCache.delete(sessionId);
+      statusPanelCache.set(sessionId, snapshot);
+      if (statusPanelCache.size > 50) {
+        const disposableId = [...statusPanelCache.keys()].find(id => !terminals.has(id) && id !== activeSessionId);
+        statusPanelCache.delete(disposableId || statusPanelCache.keys().next().value);
+      }
+    }
+    return snapshot;
+  })().finally(() => statusPanelReads.delete(sessionId));
+  statusPanelReads.set(sessionId, pending);
+  return pending;
+}
+
+async function refreshOpenSessionStatuses() {
+  if (statusPreloadRunning) return;
+  statusPreloadRunning = true;
+  try {
+    const queued = new Set();
+    const worker = async () => {
+      while (true) {
+        const ids = [...terminals.keys()];
+        if (activeSessionId && terminals.has(activeSessionId)) {
+          ids.splice(ids.indexOf(activeSessionId), 1);
+          ids.unshift(activeSessionId);
+        }
+        const id = ids.find(id => !queued.has(id) &&
+          (!statusPanelCache.has(id) || Date.now() - statusPanelCache.get(id).readAt >= STATUS_SNAPSHOT_REFRESH_MS));
+        if (!id) return;
+        queued.add(id);
+        const requestId = statusPanelRequestSeq;
+        const snapshot = await readStatusPanelSnapshot(id);
+        if (shouldApplyStatusPanelUpdate({
+          requestId,
+          currentRequestId: statusPanelRequestSeq,
+          requestedSessionId: id,
+          activeSessionId,
+          panelCollapsed: statusPanel.classList.contains('collapsed'),
+        })) {
+          loadStatusSectionState();
+          renderStatusPanel(id, snapshot.statusData, allSessions.find(session => session.id === id), snapshot.directoryAvailability);
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+  } finally {
+    statusPreloadRunning = false;
+  }
+}
+
 async function updateStatusPanel(sessionId) {
   const requestId = ++statusPanelRequestSeq;
   if (statusPanel.classList.contains('collapsed')) return;
@@ -4052,11 +4313,17 @@ async function updateStatusPanel(sessionId) {
     return;
   }
 
-  // Fetch status data and resources in parallel
-  const [statusData, session] = await Promise.all([
-    window.api.getSessionStatus(sessionId).catch(() => null),
-    Promise.resolve(allSessions.find(s => s.id === sessionId)),
-  ]);
+  const session = allSessions.find(s => s.id === sessionId);
+  const cached = statusPanelCache.get(sessionId);
+  if (cached) {
+    renderStatusPanel(sessionId, cached.statusData, session, cached.directoryAvailability);
+    if (Date.now() - cached.readAt < STATUS_SNAPSHOT_REFRESH_MS) return;
+  } else {
+    hideStatusDiffPopover();
+    statusPanelBody.innerHTML = '<div class="status-empty" role="status">Loading session status...</div>';
+  }
+
+  const snapshot = await readStatusPanelSnapshot(sessionId);
   if (!shouldApplyStatusPanelUpdate({
     requestId,
     currentRequestId: statusPanelRequestSeq,
@@ -4067,6 +4334,16 @@ async function updateStatusPanel(sessionId) {
     return;
   }
 
+  renderStatusPanel(sessionId, snapshot.statusData, allSessions.find(s => s.id === sessionId), snapshot.directoryAvailability);
+}
+
+function renderStatusPanel(sessionId, statusData, session, directoryAvailability) {
+  const sameSession = statusPanelBody.dataset.sessionId === sessionId;
+  const focused = sameSession && statusPanelBody.contains(document.activeElement)
+    ? document.activeElement : null;
+  const focusedSection = focused?.closest('.status-section')?.dataset.section;
+  const scrollTop = statusPanelBody.scrollTop;
+  statusPanelBody.dataset.sessionId = sessionId;
   const resources = session?.resources || [];
   const status = statusData || { intent: null, summary: null, nextSteps: [], files: [], generatedFiles: [], timeline: [] };
 
@@ -4084,10 +4361,6 @@ async function updateStatusPanel(sessionId) {
   const summaryText = status.summary?.text
     ? `<div class="status-summary-text">${escapeHtml(status.summary.text)}</div>`
     : '<div class="status-summary-empty">No summary yet for this session.</div>';
-  const directoryAvailability = await window.api.getSessionDirectoryAvailability(sessionId).catch(() => ({
-    sessionDirectoryAvailable: false,
-    filesDirectoryAvailable: false,
-  }));
   const summaryMeta = renderStatusSummaryMetaHtml(sessionId, directoryAvailability);
   html += renderStatusSection('summary', '📝', 'Summary', null, `${summaryText}${summaryMeta}`);
 
@@ -4141,13 +4414,13 @@ async function updateStatusPanel(sessionId) {
   if (status.generatedFiles.length > 0) {
     const generatedFilesHtml = status.generatedFiles.map((file) => {
       const badge = file.ext ? file.ext.toUpperCase().slice(0, 5) : 'FILE';
-      return `<div class="status-generated-file-item" data-session-id="${escapeHtml(sessionId)}" data-relative-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">
+      return `<button type="button" class="status-generated-file-item" data-session-id="${escapeHtml(sessionId)}" data-relative-path="${escapeHtml(file.path)}" data-source="${escapeHtml(file.source || 'session')}" title="${escapeHtml(file.source === 'artifacts' ? `.copilot/files/${sessionId}/${file.path}` : file.path)}">
         <span class="status-generated-file-badge">${escapeHtml(badge)}</span>
-        <div class="status-generated-file-details">
-          <div class="status-generated-file-name">${escapeHtml(file.name)}</div>
-          <div class="status-generated-file-path">${escapeHtml(file.path)}</div>
-        </div>
-      </div>`;
+        <span class="status-generated-file-details">
+          <span class="status-generated-file-name">${escapeHtml(file.name)}</span>
+          <span class="status-generated-file-path">${escapeHtml(file.path)}</span>
+        </span>
+      </button>`;
     }).join('');
     html += renderStatusSection('generatedFiles', '📄', 'Reports Generated', status.generatedFiles.length, generatedFilesHtml);
   }
@@ -4207,7 +4480,7 @@ async function updateStatusPanel(sessionId) {
       const relativePath = item.dataset.relativePath;
       if (!targetSessionId || !relativePath) return;
 
-      const result = await window.api.openGeneratedFile(targetSessionId, relativePath);
+      const result = await window.api.openGeneratedFile(targetSessionId, relativePath, item.dataset.source || 'session');
       if (!result?.ok) {
         showToast({
           type: 'error',
@@ -4217,6 +4490,18 @@ async function updateStatusPanel(sessionId) {
       }
     });
   });
+
+  if (focused) {
+    const controls = [...statusPanelBody.querySelectorAll('button, a, [tabindex]')];
+    const replacement = controls.find(control =>
+      control.tagName === focused.tagName && control.className === focused.className &&
+      control.closest('.status-section')?.dataset.section === focusedSection &&
+      Object.entries(focused.dataset).every(([key, value]) => control.dataset[key] === value));
+    const fallback = [...statusPanelBody.querySelectorAll('.status-section-header')]
+      .find(header => header.closest('.status-section').dataset.section === focusedSection);
+    (replacement || fallback || statusPanelBody.querySelector('.status-section-header'))?.focus({ preventScroll: true });
+  }
+  if (sameSession) statusPanelBody.scrollTop = scrollTop;
 }
 
 function fitActiveTerminal() {
@@ -5042,9 +5327,13 @@ document.addEventListener('mouseup', () => {
 
 // Events
 searchInput.addEventListener('input', (e) => {
+  const wasSearching = Boolean(searchQuery);
   searchQuery = e.target.value;
   searchClear.classList.toggle('hidden', !searchQuery);
   renderSessionList();
+  if (currentSidebarTab === 'history' && wasSearching !== Boolean(searchQuery)) {
+    void refreshSessionList().catch(reportSidebarRefreshError);
+  }
 });
 searchInput.addEventListener('focus', () => {
   document.getElementById('search-wrapper').classList.add('search-active');
@@ -5053,10 +5342,14 @@ searchInput.addEventListener('blur', () => {
   document.getElementById('search-wrapper').classList.remove('search-active');
 });
 searchClear.addEventListener('click', () => {
+  const wasSearching = Boolean(searchQuery);
   searchInput.value = '';
   searchQuery = '';
   searchClear.classList.add('hidden');
   renderSessionList();
+  if (currentSidebarTab === 'history' && wasSearching) {
+    void refreshSessionList().catch(reportSidebarRefreshError);
+  }
   searchInput.focus();
 });
 sidebarSearchToggle.addEventListener('click', () => focusSidebarSearch());
@@ -5082,7 +5375,7 @@ btnNewCenter.addEventListener('click', () => newSession());
 
 maxConcurrentInput.addEventListener('change', (e) => {
   const val = parseInt(e.target.value, 10);
-  if (val >= 1 && val <= 20) window.api.updateSettings({ maxConcurrent: val });
+  if (val >= 1 && val <= 50) window.api.updateSettings({ maxConcurrent: val });
 });
 
 useAgencyCopilotInput.addEventListener('change', async (e) => {
@@ -5103,6 +5396,18 @@ async function saveLauncherArgs(input, key) {
 
 copilotArgsInput?.addEventListener('change', (e) => {
   saveLauncherArgs(e.target, 'copilotArgs');
+});
+
+autoSessionTitlesInput?.addEventListener('change', async (e) => {
+  try {
+    const settings = await window.api.updateSettings({ autoSessionTitles: e.target.checked });
+    applySettingsToControls(settings);
+    invalidateSidebarSessionSnapshots();
+    await refreshSessionList();
+  } catch (error) {
+    applySettingsToControls(window._cachedSettings || {});
+    showToast({ type: 'error', title: 'Could not update session titles', body: String(error?.message || error) });
+  }
 });
 
 promptWorkdirInput.addEventListener('change', (e) => {
@@ -5416,6 +5721,9 @@ document.addEventListener('keydown', (e) => {
       searchClear.classList.add('hidden');
       document.getElementById('search-wrapper').classList.remove('search-active');
       renderSessionList();
+      if (currentSidebarTab === 'history') {
+        void refreshSessionList().catch(reportSidebarRefreshError);
+      }
       if (activeSessionId && terminals.has(activeSessionId)) terminals.get(activeSessionId).terminal.focus();
     }
   }
