@@ -4,6 +4,22 @@ All notable changes to DeepSky are documented here.
 
 ## [Unreleased]
 
+## [1.2.13] - 2026-11-05
+
+### Added
+- **Session title control** - Settings includes an "Automatically update session titles" toggle.
+
+### Changed
+- **Progressive History loading** - load 100 completed sessions initially and preload another 100 at rows 50, 150, 250, and so on. New rows preserve scroll and focus; recent/all scopes and scope-wide metadata search remain available.
+- **Higher session capacity** - Max open sessions now allows up to 50.
+
+### Fixed
+- **History controls fit narrow sidebars** - scope text and the loaded count sit on separate lines, with wrapping Show all/recent history and Refresh history buttons instead of one overflowing row.
+- **Faster Active/History navigation** - reuse unchanged cards and preloaded data, load Active metadata by open session ID, and prevent late responses from overwriting the selected tab.
+- **Manual titles stay manual** - explicit custom title locks prevent Copilot metadata from overwriting DeepSky renames.
+- **Generated reports cover both artifact folders** - discover and open session-scoped HTML/PDF reports from both Copilot file locations, with keyboard-accessible controls and linked-root protection.
+- **Session Status is ready before switching** - preload open-session status with bounded background workers and render fresh snapshots from memory; cold reads show loading instead of another session's content.
+
 ## [1.2.13-beta.1] - 2026-10-29
 
 ### Added

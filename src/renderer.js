@@ -931,12 +931,15 @@ function appendHistoryScopeNotice() {
   actionEl.textContent = getHistoryScopeActionLabel(historyShowsAll);
 
   noticeEl.appendChild(copyEl);
-  noticeEl.appendChild(actionEl);
+  const actionsEl = document.createElement('div');
+  actionsEl.className = 'history-scope-actions';
+  actionsEl.appendChild(actionEl);
   const refreshEl = document.createElement('button');
   refreshEl.type = 'button';
   refreshEl.className = 'history-refresh-action history-scope-action';
   refreshEl.textContent = 'Refresh history';
-  noticeEl.appendChild(refreshEl);
+  actionsEl.appendChild(refreshEl);
+  noticeEl.appendChild(actionsEl);
   if (!searchQuery) {
     const snapshot = sidebarSessionCache.get(getSidebarSessionScope());
     const progress = document.createElement('div');

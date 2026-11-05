@@ -8,6 +8,36 @@ const SessionService = require('../src/session-service');
 const source = readFileSync(join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
 const refreshSource = source.slice(source.indexOf('const sidebarSessionCache = new Map();'), source.indexOf('// Compact, stable fingerprint'));
 
+describe('History scope header', () => {
+  it.each([false, true])('separates text, wrapping actions and loaded count for all=%s', showAll => {
+    const dom = new JSDOM('<div id="list"></div>');
+    try {
+      const list = dom.window.document.getElementById('list');
+      const code = source.slice(source.indexOf('function appendHistoryScopeNotice('), source.indexOf('function getSidebarSessionScope('));
+      const helpers = require('../src/history-limit');
+      const append = new Function('document', 'sessionList', 'getHistoryScopeStatusNotice', 'getHistoryScopeActionLabel', `
+        const currentSidebarTab='history', sidebarCollapsed=false, searchQuery='';
+        const historyShowsAll=${showAll};
+        const getSidebarSessionScope=()=>historyShowsAll?'all':'history';
+        const sidebarSessionCache=new Map([[getSidebarSessionScope(),{sessions:Array(100),nextCursor:{offset:100}}]]);
+        ${code}
+        return appendHistoryScopeNotice;
+      `)(dom.window.document, list, helpers.getHistoryScopeStatusNotice, helpers.getHistoryScopeActionLabel);
+      append();
+      const header = list.querySelector('.history-scope-note');
+      expect([...header.children].map(node => node.className)).toEqual([
+        'history-scope-note-copy', 'history-scope-actions', 'history-page-status',
+      ]);
+      const buttons = [...header.querySelector('.history-scope-actions').children];
+      expect(buttons.map(button => button.textContent)).toEqual([
+        showAll ? 'Show recent history' : 'Show all history', 'Refresh history',
+      ]);
+      expect(buttons.every(button => button.tagName === 'BUTTON' && button.type === 'button')).toBe(true);
+      expect(header.querySelector('[role="status"]').textContent).toContain('100 sessions loaded');
+    } finally { dom.window.close(); }
+  });
+});
+
 function serviceWithSessions(count, excluded = []) {
   const service = new SessionService('synthetic-state');
   const now = Date.now();
